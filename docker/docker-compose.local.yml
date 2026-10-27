@@ -1,0 +1,123 @@
+
+services:
+
+  # These are the minimal services required for SeaweedFS
+  # TODO: review security configurations.
+  seaweedfs-master:
+    image: chrislusf/seaweedfs:latest
+    ports:
+      - 9333:9333
+      - 19333:19333
+      - 9324:9324
+    command: 'master -ip=seaweedfs-master -ip.bind=0.0.0.0 -metricsPort=9324 -telemetry=false'
+    volumes:
+      - seaweedfs-master-volume:/data
+  
+  seaweedfs-volume:
+    image: chrislusf/seaweedfs:latest
+    ports:
+      - 8080:8080
+      - 18080:18080
+      - 9325:9325
+    command: 'volume -ip=seaweedfs-volume -master="seaweedfs-master:9333" -ip.bind=0.0.0.0 -port=8080 -metricsPort=9325'
+    volumes:
+      - seaweedfs-volume-volume:/data
+    depends_on:
+      - seaweedfs-master
+
+  seaweedfs-filer:
+    image: chrislusf/seaweedfs:latest
+    ports:
+      - 8888:8888
+      - 18888:18888
+      - 9326:9326
+    command: 'filer -ip=seaweedfs-filer -master="seaweedfs-master:9333" -ip.bind=0.0.0.0 -metricsPort=9326'
+    volumes:
+      - seaweedfs-filer-volume:/data
+    tty: true
+    stdin_open: true
+    depends_on:
+      - seaweedfs-master
+      - seaweedfs-volume
+
+  seaweedfs-s3:
+    image: chrislusf/seaweedfs:latest
+    ports:
+      - 8333:8333
+      - 9327:9327
+    command: 's3 -filer="seaweedfs-filer:8888" -ip.bind=0.0.0.0 -metricsPort=9327'
+    volumes:
+      - seaweedfs-s3-volume:/data
+    depends_on:
+      - seaweedfs-master
+      - seaweedfs-volume
+      - seaweedfs-filer
+  webdav:
+    image: chrislusf/seaweedfs:latest
+    ports:
+      - 7333:7333
+    command: 'webdav -filer="seaweedfs-filer:8888"'
+    depends_on:
+      - seaweedfs-master
+      - seaweedfs-volume
+      - seaweedfs-filer
+  prometheus:
+    image: prom/prometheus:v2.21.0
+    ports:
+      - 9000:9090
+    volumes:
+      - ~projects/photo-album/data/prometheus:/etc/prometheus
+    command: '--web.enable-lifecycle --config.file=/etc/prometheus/prometheus.yml'
+    depends_on:
+      - seaweedfs-s3
+  
+  # This is the main database. For this project I'm gonna use Postgresql
+  db:
+    image: postgres:14.24-alpine3.23
+    restart: always
+    shm_size: 128mb
+    volumes:
+      - postgresql-volume:/var/lib/pgsql/data
+    ports:
+      - 5432:5432
+    env_file:
+      - ../.env
+
+  adminer:
+    image: adminer
+    restart: always
+    ports:
+      - 8081:8080
+
+
+volumes:
+  seaweedfs-master-volume:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ~/projects/photo-album/data/sfs-master
+  seaweedfs-volume-volume:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ~/projects/photo-album/data/sfs-volume
+  seaweedfs-filer-volume:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ~/projects/photo-album/data/sfs-filer
+  seaweedfs-s3-volume:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ~/projects/photo-album/data/sfs-s3
+  postgresql-volume:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ~/projects/photo-album/data/db
