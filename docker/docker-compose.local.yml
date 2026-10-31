@@ -77,7 +77,7 @@ services:
     restart: always
     shm_size: 128mb
     volumes:
-      - postgresql-volume:/var/lib/pgsql/data
+      - postgresql-volume:/var/lib/postgresql/data
     ports:
       - 5432:5432
     env_file:
