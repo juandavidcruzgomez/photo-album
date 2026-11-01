@@ -28,3 +28,15 @@ CREATE TABLE IF NOT EXISTS crawled_files (
     content_hash text NOT NULL,
     seen_at      timestamptz NOT NULL DEFAULT now()
 );
+
+-- Wake up listening indexers as soon as jobs are queued.
+CREATE OR REPLACE FUNCTION notify_index_jobs() RETURNS trigger AS $$
+BEGIN
+    PERFORM pg_notify('index_jobs', '');
+    RETURN NULL;
+END
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS index_jobs_notify ON index_jobs;
+CREATE TRIGGER index_jobs_notify AFTER INSERT ON index_jobs
+    FOR EACH STATEMENT EXECUTE FUNCTION notify_index_jobs();

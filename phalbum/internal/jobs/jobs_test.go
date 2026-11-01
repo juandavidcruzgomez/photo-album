@@ -3,48 +3,19 @@ package jobs
 import (
 	"context"
 	"errors"
-	"fmt"
-	"os"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/dbtest"
 )
 
-// openTest returns a Store on a fresh schema, or skips when no test database
-// is configured via PHALBUM_TEST_DATABASE_URL.
 func openTest(t *testing.T) *Store {
 	t.Helper()
-	dsn := os.Getenv("PHALBUM_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("PHALBUM_TEST_DATABASE_URL not set")
-	}
-	ctx := context.Background()
-	schemaName := fmt.Sprintf("test_%d", time.Now().UnixNano())
-
-	admin, err := pgx.Connect(ctx, dsn)
+	s, err := New(context.Background(), dbtest.Pool(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schemaName); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		admin.Exec(context.Background(), "DROP SCHEMA "+schemaName+" CASCADE")
-		admin.Close(context.Background())
-	})
-
-	sep := "?"
-	if strings.Contains(dsn, "?") {
-		sep = "&"
-	}
-	s, err := Open(ctx, dsn+sep+"search_path="+schemaName)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(s.Close)
 	return s
 }
 
@@ -161,5 +132,60 @@ func TestConcurrentClaim(t *testing.T) {
 	}
 	if won != 1 {
 		t.Errorf("%d claims succeeded, want 1", won)
+	}
+}
+
+func TestListenerWait(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	l, err := s.Listen(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	start := time.Now()
+	if err := l.Wait(ctx, 200*time.Millisecond); err != nil {
+		t.Fatalf("timeout should return nil, got %v", err)
+	}
+	if time.Since(start) < 200*time.Millisecond {
+		t.Error("Wait returned before the timeout without a notification")
+	}
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		s.Enqueue(ctx, newJob("h1", "/a/x.jpg"))
+	}()
+	start = time.Now()
+	if err := l.Wait(ctx, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("notification took %v", d)
+	}
+
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := l.Wait(cctx, time.Second); err == nil {
+		t.Error("Wait on a cancelled context should fail")
+	}
+}
+
+func TestRequeueStale(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	s.Enqueue(ctx, newJob("old", "/a/old.jpg"))
+	s.Enqueue(ctx, newJob("new", "/a/new.jpg"))
+	old, _ := s.Claim(ctx)
+	s.Claim(ctx)
+	s.pool.Exec(ctx, "UPDATE index_jobs SET updated_at = now() - interval '1 hour' WHERE job_id = $1", old.ID)
+
+	n, err := s.RequeueStale(ctx, 10*time.Minute)
+	if err != nil || n != 1 {
+		t.Fatalf("requeued %d, err=%v", n, err)
+	}
+	j, err := s.Claim(ctx)
+	if err != nil || j.Hash != "old" || j.Attempts != 2 {
+		t.Errorf("reclaimed %+v, err=%v", j, err)
 	}
 }

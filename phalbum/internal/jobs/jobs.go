@@ -15,6 +15,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/db"
 )
 
 //go:embed schema.sql
@@ -36,15 +38,26 @@ type Store struct {
 	pool *pgxpool.Pool
 }
 
-// Open connects to Postgres and makes sure the schema exists.
+// Open connects to Postgres and makes sure the schema exists. The Store owns
+// the pool; Close releases it.
 func Open(ctx context.Context, dsn string) (*Store, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := pool.Exec(ctx, schema); err != nil {
+	s, err := New(ctx, pool)
+	if err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("applying schema: %w", err)
+		return nil, err
+	}
+	return s, nil
+}
+
+// New uses an existing pool, making sure the schema exists. Closing the pool
+// is left to the caller.
+func New(ctx context.Context, pool *pgxpool.Pool) (*Store, error) {
+	if err := db.ApplySchema(ctx, pool, schema); err != nil {
+		return nil, err
 	}
 	return &Store{pool: pool}, nil
 }
@@ -150,6 +163,8 @@ type Job struct {
 	URI       string
 	Filename  string
 	MimeType  string
+	Extension string
+	Size      int64
 	Tags      []string
 	Exif      map[string]string
 	Attempts  int
@@ -172,8 +187,8 @@ func (s *Store) Claim(ctx context.Context) (*Job, error) {
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
 		)
-		RETURNING job_id::text, content_hash, uri, filename, mime_type, tags, exif, attempts, created_at`,
-	).Scan(&j.ID, &j.Hash, &j.URI, &j.Filename, &j.MimeType, &j.Tags, &exif, &j.Attempts, &j.CreatedAt)
+		RETURNING job_id::text, content_hash, uri, filename, mime_type, extension, size, tags, exif, attempts, created_at`,
+	).Scan(&j.ID, &j.Hash, &j.URI, &j.Filename, &j.MimeType, &j.Extension, &j.Size, &j.Tags, &exif, &j.Attempts, &j.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNoJobs
 	}
@@ -209,4 +224,54 @@ func (s *Store) setStatus(ctx context.Context, id, status, msg string) error {
 		return fmt.Errorf("job %s not found", id)
 	}
 	return nil
+}
+
+// RequeueStale puts back jobs that have been processing for longer than
+// olderThan, e.g. because the indexer crashed. It returns how many moved.
+func (s *Store) RequeueStale(ctx context.Context, olderThan time.Duration) (int, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE index_jobs SET status = 'queued', updated_at = now()
+		WHERE status = 'processing' AND updated_at < now() - make_interval(secs => $1)`,
+		olderThan.Seconds())
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// Listener receives a notification whenever jobs are queued.
+type Listener struct {
+	conn *pgx.Conn
+}
+
+// Listen opens a dedicated connection subscribed to new-job notifications.
+func (s *Store) Listen(ctx context.Context) (*Listener, error) {
+	c, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	conn := c.Hijack()
+	if _, err := conn.Exec(ctx, "LISTEN index_jobs"); err != nil {
+		conn.Close(ctx)
+		return nil, err
+	}
+	return &Listener{conn: conn}, nil
+}
+
+// Wait blocks until jobs are queued or timeout passes, whichever comes
+// first; either way the caller should check the queue. It returns an error
+// only when ctx is done or the connection broke.
+func (l *Listener) Wait(ctx context.Context, timeout time.Duration) error {
+	wctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	_, err := l.conn.WaitForNotification(wctx)
+	if err != nil && ctx.Err() == nil && errors.Is(wctx.Err(), context.DeadlineExceeded) {
+		return nil
+	}
+	return err
+}
+
+// Close closes the listener's connection.
+func (l *Listener) Close() {
+	l.conn.Close(context.Background())
 }
