@@ -2,3 +2,5 @@
 .env
 data/**
 !data/.gitkeep
+phalbum/models/
+main
