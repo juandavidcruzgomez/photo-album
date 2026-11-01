@@ -73,7 +73,7 @@ services:
   
   # This is the main database. For this project I'm gonna use Postgresql
   db:
-    image: postgres:14.24-alpine3.23
+    image: pgvector/pgvector:pg14
     restart: always
     shm_size: 128mb
     volumes:
@@ -81,7 +81,7 @@ services:
     ports:
       - 5432:5432
     env_file:
-      - ../.env
+      - ../phalbum/.env
 
   adminer:
     image: adminer
