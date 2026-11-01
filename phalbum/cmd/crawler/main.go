@@ -8,17 +8,23 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/crawler"
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/jobs"
+	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/settings"
 )
 
 func main() {
-	dsn := flag.String("db", defaultDSN(), "Postgres connection string (default: $DATABASE_URL, or built from $POSTGRES_USER/$POSTGRES_PASSWORD)")
+	cfg, err := settings.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	dsn := flag.String("db", "", "Postgres connection string (default: from settings, i.e. $DATABASE_URL or $POSTGRES_*)")
 	dryRun := flag.Bool("dry-run", false, "only list the images found, don't touch the database")
 	flag.Parse()
 	root := "."
@@ -29,7 +35,9 @@ func main() {
 	ctx := context.Background()
 	var store *jobs.Store
 	if !*dryRun {
-		var err error
+		if *dsn == "" {
+			*dsn = cfg.DSN()
+		}
 		if store, err = jobs.Open(ctx, *dsn); err != nil {
 			fmt.Fprintln(os.Stderr, "database:", err)
 			os.Exit(1)
@@ -99,22 +107,6 @@ func enqueue(ctx context.Context, store *jobs.Store, images []crawler.Image, sta
 	q.done = len(images)
 	status.done()
 	return errs
-}
-
-// defaultDSN uses $DATABASE_URL, falling back to the local docker-compose
-// database configured through .env.
-func defaultDSN() string {
-	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
-		return dsn
-	}
-	u := url.URL{
-		Scheme:   "postgres",
-		User:     url.UserPassword(os.Getenv("POSTGRES_USER"), os.Getenv("POSTGRES_PASSWORD")),
-		Host:     "localhost:5432",
-		Path:     "postgres",
-		RawQuery: "sslmode=disable",
-	}
-	return u.String()
 }
 
 // status renders a single, self-overwriting progress line on stderr while
