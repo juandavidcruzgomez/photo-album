@@ -42,3 +42,11 @@ CREATE TABLE IF NOT EXISTS photo_tags (
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (photo_id, tag_id)
 );
+
+-- captured_at: when the photo was taken, falling back to the file's
+-- modification time, so photos without EXIF can still be filtered by date.
+ALTER TABLE photos ADD COLUMN IF NOT EXISTS captured_at timestamptz;
+UPDATE photos p SET captured_at = COALESCE(p.taken_at,
+    (SELECT min(f.mod_time) FROM crawled_files f WHERE f.content_hash = p.content_hash))
+WHERE p.captured_at IS NULL;
+CREATE INDEX IF NOT EXISTS photos_captured_at_idx ON photos (captured_at DESC NULLS LAST, id);

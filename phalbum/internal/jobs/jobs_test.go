@@ -144,19 +144,28 @@ func TestListenerWait(t *testing.T) {
 	}
 	defer l.Close()
 
-	start := time.Now()
-	if err := l.Wait(ctx, 200*time.Millisecond); err != nil {
-		t.Fatalf("timeout should return nil, got %v", err)
+	// Other test packages share the database and its notification channel,
+	// so an early wake-up can happen; at least one wait must time out.
+	timedOut := false
+	for range 5 {
+		start := time.Now()
+		if err := l.Wait(ctx, 200*time.Millisecond); err != nil {
+			t.Fatalf("timeout should return nil, got %v", err)
+		}
+		if time.Since(start) >= 200*time.Millisecond {
+			timedOut = true
+			break
+		}
 	}
-	if time.Since(start) < 200*time.Millisecond {
-		t.Error("Wait returned before the timeout without a notification")
+	if !timedOut {
+		t.Error("Wait never reached its timeout")
 	}
 
 	go func() {
 		time.Sleep(100 * time.Millisecond)
 		s.Enqueue(ctx, newJob("h1", "/a/x.jpg"))
 	}()
-	start = time.Now()
+	start := time.Now()
 	if err := l.Wait(ctx, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
@@ -187,5 +196,28 @@ func TestRequeueStale(t *testing.T) {
 	j, err := s.Claim(ctx)
 	if err != nil || j.Hash != "old" || j.Attempts != 2 {
 		t.Errorf("reclaimed %+v, err=%v", j, err)
+	}
+}
+
+func TestRetryFailed(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	s.Enqueue(ctx, newJob("bad", "/a/bad.jpg"))
+	s.Enqueue(ctx, newJob("good", "/a/good.jpg"))
+	bad, _ := s.Claim(ctx)
+	s.Fail(ctx, bad.ID, "boom")
+	good, _ := s.Claim(ctx)
+	s.Complete(ctx, good.ID)
+
+	n, err := s.RetryFailed(ctx)
+	if err != nil || n != 1 {
+		t.Fatalf("retried %d, err=%v", n, err)
+	}
+	j, err := s.Claim(ctx)
+	if err != nil || j.Hash != "bad" {
+		t.Errorf("reclaimed %+v, err=%v", j, err)
+	}
+	if _, err := s.Claim(ctx); !errors.Is(err, ErrNoJobs) {
+		t.Errorf("successful job must not be retried: %v", err)
 	}
 }

@@ -12,12 +12,11 @@ import (
 // metadata is what the indexer reads from a photo's EXIF block. Every field
 // is optional.
 type metadata struct {
-	Orientation int
-	TakenAt     *time.Time
-	Make        string
-	Model       string
-	Latitude    *float64
-	Longitude   *float64
+	TakenAt   *time.Time
+	Make      string
+	Model     string
+	Latitude  *float64
+	Longitude *float64
 }
 
 // readMetadata decodes EXIF from the file bytes. Missing or malformed EXIF
@@ -31,11 +30,6 @@ func readMetadata(data []byte) (m metadata) {
 	x, err := exif.Decode(bytes.NewReader(data))
 	if err != nil {
 		return metadata{}
-	}
-	if tag, err := x.Get(exif.Orientation); err == nil {
-		if o, err := tag.Int(0); err == nil {
-			m.Orientation = o
-		}
 	}
 	if t, err := x.DateTime(); err == nil && !t.IsZero() {
 		m.TakenAt = &t

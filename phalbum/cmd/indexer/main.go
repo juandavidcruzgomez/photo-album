@@ -2,7 +2,7 @@
 // embeddings, stores thumbnails in SeaweedFS and saves photos in the library.
 // It starts on new jobs as soon as the crawler queues them.
 //
-//	go run ./cmd/indexer [-once] [-store-originals]
+//	go run ./cmd/indexer [-once] [-store-originals] [-retry-failed]
 package main
 
 import (
@@ -43,6 +43,7 @@ func run() error {
 	lib := flag.String("lib", cfg.OnnxLib, "path to the ONNX Runtime shared library")
 	models := flag.String("models", cfg.ModelsDir, "directory with the CLIP ONNX models")
 	threads := flag.Int("threads", 0, "ONNX Runtime threads (0 lets it decide)")
+	retryFailed := flag.Bool("retry-failed", false, "queue failed jobs again before starting")
 	flag.Parse()
 	if *dsn == "" {
 		*dsn = cfg.DSN()
@@ -63,6 +64,14 @@ func run() error {
 	photos, err := library.New(ctx, pool)
 	if err != nil {
 		return fmt.Errorf("database: %w", err)
+	}
+
+	if *retryFailed {
+		n, err := jobStore.RetryFailed(ctx)
+		if err != nil {
+			return fmt.Errorf("retrying failed jobs: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "requeued %d failed jobs\n", n)
 	}
 
 	objects, err := storage.NewS3(ctx, storage.S3Config{

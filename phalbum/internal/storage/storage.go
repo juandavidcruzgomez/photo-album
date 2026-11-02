@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -16,6 +17,16 @@ import (
 // ObjectStore is what the indexer needs from storage.
 type ObjectStore interface {
 	Put(ctx context.Context, key, contentType string, body []byte) error
+}
+
+// ErrNotFound is returned by Get for missing objects.
+var ErrNotFound = errors.New("object not found")
+
+// Object is an object being read; the caller must close Body.
+type Object struct {
+	Body        io.ReadCloser
+	Size        int64
+	ContentType string
 }
 
 // OriginalKey is where an original image is stored.
@@ -92,4 +103,17 @@ func (s *S3) Put(ctx context.Context, key, contentType string, body []byte) erro
 		return fmt.Errorf("uploading %s: %w", key, err)
 	}
 	return nil
+}
+
+// Get opens an object for reading.
+func (s *S3) Get(ctx context.Context, key string) (*Object, error) {
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &s.bucket, Key: &key})
+	var missing *types.NoSuchKey
+	if errors.As(err, &missing) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", key, err)
+	}
+	return &Object{Body: out.Body, Size: aws.ToInt64(out.ContentLength), ContentType: aws.ToString(out.ContentType)}, nil
 }

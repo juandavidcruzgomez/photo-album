@@ -65,3 +65,41 @@ func TestThumbnail(t *testing.T) {
 		t.Errorf("thumbnail size %v", b.Size())
 	}
 }
+
+func encodeJPEG(t *testing.T, w, h int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, w, h)), nil); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestPrepareFallsBackToEmbeddedPreview(t *testing.T) {
+	// A JPEG whose main image data is cut short, followed by a tiny
+	// thumbnail and a larger preview, like the broken scans in the wild.
+	main := encodeJPEG(t, 400, 300)
+	broken := append([]byte{}, main[:len(main)/2]...)
+	broken = append(broken, encodeJPEG(t, 16, 12)...)
+	broken = append(broken, encodeJPEG(t, 64, 48)...)
+
+	p, err := Prepare(broken, EmbedSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.FromPreview || p.Width != 64 || p.Height != 48 {
+		t.Errorf("got %dx%d fromPreview=%v, want the 64x48 preview", p.Width, p.Height, p.FromPreview)
+	}
+
+	ok, err := Prepare(main, EmbedSize)
+	if err != nil || ok.FromPreview || ok.Width != 400 {
+		t.Errorf("intact JPEG: %+v %v", ok, err)
+	}
+
+	if _, err := Prepare(main[:len(main)/2], EmbedSize); err == nil {
+		t.Error("broken JPEG without a preview should fail")
+	}
+	if _, err := Prepare([]byte("not an image"), EmbedSize); err == nil {
+		t.Error("non-image should fail")
+	}
+}

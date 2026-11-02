@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -38,9 +39,13 @@ type Settings struct {
 	// thumbnails.
 	StoreOriginals bool
 
-	// CLIP model files used by the indexer.
+	// CLIP model files used by the indexer and the API.
 	OnnxLib   string
 	ModelsDir string
+
+	// Search API.
+	APIAddr     string
+	CORSOrigins []string
 }
 
 // Load reads the configuration. Values already in the environment win over
@@ -69,6 +74,8 @@ func Load() (*Settings, error) {
 		StoreOriginals:   storeOriginals,
 		OnnxLib:          getenv("ONNX_LIB", "models/libonnxruntime.so.1.31.0"),
 		ModelsDir:        getenv("CLIP_MODELS_DIR", "models/clip-vit-base-patch32"),
+		APIAddr:          getenv("API_ADDR", ":8090"),
+		CORSOrigins:      splitList(getenv("CORS_ORIGINS", "*")),
 	}, nil
 }
 
@@ -105,4 +112,14 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func splitList(v string) []string {
+	var out []string
+	for _, s := range strings.Split(v, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }

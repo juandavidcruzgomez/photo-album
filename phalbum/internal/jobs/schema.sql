@@ -40,3 +40,6 @@ $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS index_jobs_notify ON index_jobs;
 CREATE TRIGGER index_jobs_notify AFTER INSERT ON index_jobs
     FOR EACH STATEMENT EXECUTE FUNCTION notify_index_jobs();
+
+-- Lets the library find a photo's source paths and file dates.
+CREATE INDEX IF NOT EXISTS crawled_files_hash_idx ON crawled_files (content_hash);

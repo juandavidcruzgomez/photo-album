@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -39,6 +40,19 @@ func TestS3(t *testing.T) {
 	if err := s.Put(ctx, key, "text/plain", []byte("hello")); err != nil {
 		t.Fatal(err)
 	}
+	obj, err := s.Get(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(obj.Body)
+	obj.Body.Close()
+	if string(got) != "hello" || obj.Size != 5 || obj.ContentType != "text/plain" {
+		t.Errorf("Get: %q size=%d type=%s", got, obj.Size, obj.ContentType)
+	}
+	if _, err := s.Get(ctx, "test/missing"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("missing object: %v", err)
+	}
+
 	resp, err := http.Get(endpoint + "/" + bucket + "/" + key)
 	if err != nil {
 		t.Fatal(err)

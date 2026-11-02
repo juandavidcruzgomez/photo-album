@@ -4,7 +4,6 @@
 package indexer
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -144,7 +143,7 @@ func (ix *Indexer) Process(ctx context.Context, job *jobs.Job) error {
 		return errors.New("content changed since crawl")
 	}
 
-	img, _, err := image.Decode(bytes.NewReader(data))
+	prep, err := imaging.Prepare(data, workingSize)
 	if errors.Is(err, image.ErrFormat) {
 		return fmt.Errorf("unsupported format: %s", job.Extension)
 	}
@@ -152,11 +151,11 @@ func (ix *Indexer) Process(ctx context.Context, job *jobs.Job) error {
 		return fmt.Errorf("decoding: %w", err)
 	}
 	meta := readMetadata(data)
-	work := imaging.Orient(imaging.Shrink(img, workingSize), meta.Orientation)
-	width, height := img.Bounds().Dx(), img.Bounds().Dy()
-	if meta.Orientation >= 5 && meta.Orientation <= 8 {
-		width, height = height, width
+
+	if prep.FromPreview {
+		ix.logf("  %s: main image unreadable, using its embedded %dx%d preview\n", job.Filename, prep.Width, prep.Height)
 	}
+	work, width, height := prep.Image, prep.Width, prep.Height
 
 	emb, err := ix.Embedder.EmbedImages(work)
 	if err != nil {

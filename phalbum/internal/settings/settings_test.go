@@ -51,6 +51,11 @@ func TestLoadWithoutEnvFile(t *testing.T) {
 		t.Errorf("unexpected S3 defaults %+v", s)
 	}
 
+	t.Setenv("CORS_ORIGINS", "http://a.local, http://b.local,")
+	if s, _ := Load(); len(s.CORSOrigins) != 2 || s.CORSOrigins[1] != "http://b.local" || s.APIAddr != ":8090" {
+		t.Errorf("API settings %+v", s)
+	}
+
 	t.Setenv("STORE_ORIGINALS", "maybe")
 	if _, err := Load(); err == nil {
 		t.Error("invalid STORE_ORIGINALS should fail")

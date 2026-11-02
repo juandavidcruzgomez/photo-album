@@ -14,7 +14,12 @@ import (
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
+
+	"github.com/rwcarlsen/goexif/exif"
 )
+
+// EmbedSize is a working-copy size comfortably above CLIP's 224px input.
+const EmbedSize = 512
 
 // Shrink scales img down so its shorter side is at most minSide, keeping the
 // aspect ratio. Smaller images are only converted to RGBA. Working on a
@@ -82,4 +87,85 @@ func Thumbnail(img image.Image, maxSide int) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// ReadOrientation returns the EXIF orientation (1–8) of an encoded image,
+// or 0 when there is none.
+func ReadOrientation(data []byte) (o int) {
+	defer func() {
+		if recover() != nil { // goexif can panic on corrupt data
+			o = 0
+		}
+	}()
+	x, err := exif.Decode(bytes.NewReader(data))
+	if err != nil {
+		return 0
+	}
+	tag, err := x.Get(exif.Orientation)
+	if err != nil {
+		return 0
+	}
+	o, _ = tag.Int(0)
+	return o
+}
+
+// Prepared is a decoded image ready for embedding and thumbnailing.
+type Prepared struct {
+	Image       *image.RGBA // upright, short side at most the requested size
+	Width       int         // upright size of the decoded image
+	Height      int
+	Orientation int  // EXIF orientation, 0 when unknown
+	FromPreview bool // the main image was unreadable; an embedded preview was used
+}
+
+// Prepare decodes an encoded image and returns an upright copy whose short
+// side is at most minSide. When a JPEG's main image can't be decoded (e.g. a
+// corrupt scan), the largest embedded JPEG preview is used instead, if any.
+func Prepare(data []byte, minSide int) (*Prepared, error) {
+	src, _, err := image.Decode(bytes.NewReader(data))
+	fromPreview := false
+	if err != nil {
+		preview := embeddedJPEG(data)
+		if preview == nil {
+			return nil, err
+		}
+		src, fromPreview = preview, true
+	}
+	p := &Prepared{
+		Orientation: ReadOrientation(data),
+		Width:       src.Bounds().Dx(),
+		Height:      src.Bounds().Dy(),
+		FromPreview: fromPreview,
+	}
+	if p.Orientation >= 5 && p.Orientation <= 8 {
+		p.Width, p.Height = p.Height, p.Width
+	}
+	p.Image = Orient(Shrink(src, minSide), p.Orientation)
+	return p, nil
+}
+
+// soi starts every JPEG: the start-of-image marker followed by another marker.
+var soi = []byte{0xff, 0xd8, 0xff}
+
+// embeddedJPEG returns the largest decodable JPEG embedded in a JPEG file
+// (camera previews, EXIF thumbnails), or nil when there is none.
+func embeddedJPEG(data []byte) image.Image {
+	if !bytes.HasPrefix(data, soi) {
+		return nil
+	}
+	var best image.Image
+	for off := 2; ; {
+		i := bytes.Index(data[off:], soi)
+		if i < 0 {
+			return best
+		}
+		off += i
+		cfg, err := jpeg.DecodeConfig(bytes.NewReader(data[off:]))
+		if err == nil && (best == nil || cfg.Width*cfg.Height > best.Bounds().Dx()*best.Bounds().Dy()) {
+			if img, err := jpeg.Decode(bytes.NewReader(data[off:])); err == nil {
+				best = img
+			}
+		}
+		off += len(soi)
+	}
 }

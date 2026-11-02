@@ -239,6 +239,17 @@ func (s *Store) RequeueStale(ctx context.Context, olderThan time.Duration) (int,
 	return int(tag.RowsAffected()), nil
 }
 
+// RetryFailed queues all failed jobs again and returns how many moved.
+func (s *Store) RetryFailed(ctx context.Context) (int, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE index_jobs SET status = 'queued', message = '', updated_at = now()
+		WHERE status = 'error'`)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 // Listener receives a notification whenever jobs are queued.
 type Listener struct {
 	conn *pgx.Conn

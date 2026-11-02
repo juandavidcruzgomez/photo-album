@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/db"
+	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/jobs"
 )
 
 //go:embed schema.sql
@@ -33,7 +34,12 @@ type Store struct {
 }
 
 // New makes sure the schema exists. The pool stays owned by the caller.
+// The jobs schema is applied first, because photos read source paths and
+// file dates from crawled_files.
 func New(ctx context.Context, pool *pgxpool.Pool) (*Store, error) {
+	if _, err := jobs.New(ctx, pool); err != nil {
+		return nil, err
+	}
 	if err := db.ApplySchema(ctx, pool, schema); err != nil {
 		return nil, err
 	}
@@ -75,8 +81,9 @@ func (s *Store) SavePhoto(ctx context.Context, p Photo, pathTags []string) (id s
 		err := tx.QueryRow(ctx, `
 			INSERT INTO photos (content_hash, original_key, thumbnail_key, filename, mime_type, extension,
 			                    size, width, height, taken_at, camera_make, camera_model,
-			                    latitude, longitude, exif, embedding, model)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::vector, $17)
+			                    latitude, longitude, exif, embedding, model, captured_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::vector, $17,
+			        COALESCE($10, (SELECT min(mod_time) FROM crawled_files WHERE content_hash = $1)))
 			ON CONFLICT (content_hash) DO UPDATE SET
 			    original_key = COALESCE(EXCLUDED.original_key, photos.original_key),
 			    thumbnail_key = EXCLUDED.thumbnail_key, filename = EXCLUDED.filename,
@@ -84,7 +91,8 @@ func (s *Store) SavePhoto(ctx context.Context, p Photo, pathTags []string) (id s
 			    width = EXCLUDED.width, height = EXCLUDED.height, taken_at = EXCLUDED.taken_at,
 			    camera_make = EXCLUDED.camera_make, camera_model = EXCLUDED.camera_model,
 			    latitude = EXCLUDED.latitude, longitude = EXCLUDED.longitude, exif = EXCLUDED.exif,
-			    embedding = EXCLUDED.embedding, model = EXCLUDED.model, indexed_at = now()
+			    embedding = EXCLUDED.embedding, model = EXCLUDED.model,
+			    captured_at = EXCLUDED.captured_at, indexed_at = now()
 			RETURNING id::text`,
 			p.ContentHash, nullable(p.OriginalKey), p.ThumbnailKey, p.Filename, p.MimeType, p.Extension,
 			p.Size, p.Width, p.Height, p.TakenAt, nullable(p.CameraMake), nullable(p.CameraModel),
