@@ -38,6 +38,30 @@ The job should contain:
 
 ```
 
+## Web app
+
+The browser UI lives in `phalbum/web`: React 19 + Vite + Tailwind CSS v4 + shadcn/ui, with
+TanStack Query for data and wouter for routing. It is a static single-page app: `npm run build`
+writes `web/dist`, which is embedded into the `api` binary (`go:embed`), so one process serves both
+the API and the app on the same origin.
+
+- Browse by date (grouped by year, with a year jump bar), search by text, by an uploaded picture,
+  or "more like this", and filter by tags and dates. All filters live in the URL.
+- Tag one photo from the viewer's info panel, or select several (long-press on touch, the
+  check mark or shift-click on desktop) and tag them at once. Tags are managed at `/tags`.
+- `/admin` is reserved for the future administration UI.
+
+Requires Node 20.19+ (see `web/.nvmrc`).
+
+```sh
+cd phalbum
+make api        # npm ci + build the web app, then go build -o bin/api ./cmd/api
+make dev-web    # Vite on http://localhost:5173 with hot reload; proxies /api to :8090
+make gen-api    # regenerate web/src/api/schema.d.ts after changing api/openapi.yaml
+```
+
+Without a web build, the API still works and `/` answers 503 with a hint to build the app.
+
 ## Seaweedfs
 This is the storage layer of the system. The goal of SeaweedFS is to make O(1) disk access. This
 is done by the separation of the data and metadata paths.

@@ -77,6 +77,7 @@ func TestSearch(t *testing.T) {
 		more bool
 	}{
 		{"browse newest first, file date fallback", Query{Limit: 10}, []string{"a", "c", "b"}, false},
+		{"oldest first", Query{Ascending: true, Limit: 10}, []string{"b", "c", "a"}, false},
 		{"paging", Query{Limit: 2}, []string{"a", "c"}, true},
 		{"second page", Query{Limit: 2, Offset: 2}, []string{"b"}, false},
 		{"similarity", Query{Embedding: near, Limit: 10}, []string{"c", "b", "a"}, false},
@@ -216,5 +217,31 @@ func TestTagManagement(t *testing.T) {
 		if tg.Name == "Trip" && tg.Photos != 2 {
 			t.Errorf("Trip count = %d", tg.Photos)
 		}
+	}
+}
+
+func TestYears(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	seed(t, s)
+
+	got, err := s.Years(ctx, Query{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []YearCount{{2024, 1}, {2023, 1}, {2022, 1}}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Errorf("years = %v, want %v", got, want)
+	}
+	got, err = s.Years(ctx, Query{Tags: []string{"paris"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Year != 2024 || got[1].Year != 2022 {
+		t.Errorf("years with tag = %v", got)
+	}
+	got, err = s.Years(ctx, Query{Tags: []string{"nope"}})
+	if err != nil || got == nil || len(got) != 0 {
+		t.Errorf("years for unknown tag = %v, %v", got, err)
 	}
 }

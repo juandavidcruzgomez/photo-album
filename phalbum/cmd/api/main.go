@@ -1,4 +1,4 @@
-// Command api serves the search API used by the web app.
+// Command api serves the search API and the web app.
 //
 //	go run ./cmd/api [-addr :8090]
 package main
@@ -22,6 +22,7 @@ import (
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/library"
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/settings"
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/storage"
+	"github.com/juandavidcruzgomez/photo-album/phalbum/web"
 )
 
 func main() {
@@ -77,7 +78,7 @@ func run() error {
 	srv := &http.Server{
 		Addr: *addr,
 		Handler: (&api.Server{
-			Library: photos, Embedder: clip, Objects: objects,
+			Library: photos, Embedder: clip, Objects: objects, Static: web.Handler(),
 			Ping: pool.Ping, CORSOrigins: cfg.CORSOrigins,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,

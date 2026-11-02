@@ -29,6 +29,7 @@ type Library interface {
 	TagPhoto(ctx context.Context, photoID, name string) (library.TagRef, error)
 	UntagPhoto(ctx context.Context, photoID string, tagID int64) error
 	TagPhotos(ctx context.Context, photoIDs, add []string, remove []int64) error
+	Years(ctx context.Context, q library.Query) ([]library.YearCount, error)
 }
 
 // Embedder computes CLIP embeddings; *embedding.CLIP satisfies it.
@@ -47,6 +48,7 @@ type Server struct {
 	Library     Library
 	Embedder    Embedder
 	Objects     Objects
+	Static      http.Handler                // serves the web app for non-API paths; nil serves nothing
 	Ping        func(context.Context) error // health check; nil means always healthy
 	CORSOrigins []string                    // allowed origins; "*" allows any
 	Log         *log.Logger                 // request and error log; nil uses the default logger
@@ -61,6 +63,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/photos", s.listPhotos)
 	mux.HandleFunc("POST /api/photos/search", s.searchByImage)
 	mux.HandleFunc("POST /api/photos/tags", s.tagPhotos)
+	mux.HandleFunc("GET /api/years", s.listYears)
 	mux.HandleFunc("GET /api/photos/{id}", s.getPhoto)
 	mux.HandleFunc("GET /api/photos/{id}/thumbnail", s.thumbnail)
 	mux.HandleFunc("GET /api/photos/{id}/original", s.original)
@@ -70,6 +73,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/tags", s.createTag)
 	mux.HandleFunc("PATCH /api/tags/{id}", s.renameTag)
 	mux.HandleFunc("DELETE /api/tags/{id}", s.deleteTag)
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+	})
+	if s.Static != nil {
+		mux.Handle("/", s.Static)
+	}
 	return s.logRequests(s.recoverPanics(s.cors(mux)))
 }
 

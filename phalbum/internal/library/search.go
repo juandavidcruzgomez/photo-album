@@ -22,6 +22,7 @@ type Query struct {
 	Tags      []string   // photos must have all of these (case-insensitive)
 	From      *time.Time // captured_at >= From
 	Before    *time.Time // captured_at < Before
+	Ascending bool       // oldest first when listing; ignored when ranking by similarity
 	Limit     int
 	Offset    int
 }
@@ -65,28 +66,12 @@ const resultColumns = `p.id::text, p.filename, p.width, p.height, p.captured_at,
 
 // Search returns one page of photos matching q, and whether more follow.
 func (s *Store) Search(ctx context.Context, q Query) (results []Result, more bool, err error) {
-	var where []string
 	var args []any
 	arg := func(v any) string {
 		args = append(args, v)
 		return fmt.Sprintf("$%d", len(args))
 	}
-	if tags := normalizeTags(q.Tags); len(tags) > 0 {
-		where = append(where, fmt.Sprintf(`p.id IN (
-			SELECT pt.photo_id FROM photo_tags pt JOIN tags t ON t.id = pt.tag_id
-			WHERE lower(t.name) = ANY(%s)
-			GROUP BY pt.photo_id HAVING count(*) = %s)`, arg(tags), arg(len(tags))))
-	}
-	if q.From != nil {
-		where = append(where, "p.captured_at >= "+arg(*q.From))
-	}
-	if q.Before != nil {
-		where = append(where, "p.captured_at < "+arg(*q.Before))
-	}
-	cond := ""
-	if len(where) > 0 {
-		cond = "WHERE " + strings.Join(where, " AND ")
-	}
+	cond := whereClause(q, arg)
 	limit, offset := q.Limit+1, q.Offset // one extra row tells whether there's a next page
 
 	var sql string
@@ -103,9 +88,13 @@ func (s *Store) Search(ctx context.Context, q Query) (results []Result, more boo
 			SELECT * FROM c ORDER BY distance LIMIT %d OFFSET %d`,
 			resultColumns, v, cond, limit+offset, limit, offset)
 	} else {
+		dir := "DESC"
+		if q.Ascending {
+			dir = "ASC"
+		}
 		sql = fmt.Sprintf(`SELECT %s, NULL::float8 FROM photos p %s
-			ORDER BY p.captured_at DESC NULLS LAST, p.id LIMIT %d OFFSET %d`,
-			resultColumns, cond, limit, offset)
+			ORDER BY p.captured_at %s NULLS LAST, p.id LIMIT %d OFFSET %d`,
+			resultColumns, cond, dir, limit, offset)
 	}
 
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -139,6 +128,64 @@ func (s *Store) Search(ctx context.Context, q Query) (results []Result, more boo
 		results, more = results[:q.Limit], true
 	}
 	return results, more, nil
+}
+
+// whereClause builds the WHERE clause for q's tag and date filters, adding
+// its parameters with arg. It returns "" when there are no filters.
+func whereClause(q Query, arg func(any) string) string {
+	var where []string
+	if tags := normalizeTags(q.Tags); len(tags) > 0 {
+		where = append(where, fmt.Sprintf(`p.id IN (
+			SELECT pt.photo_id FROM photo_tags pt JOIN tags t ON t.id = pt.tag_id
+			WHERE lower(t.name) = ANY(%s)
+			GROUP BY pt.photo_id HAVING count(*) = %s)`, arg(tags), arg(len(tags))))
+	}
+	if q.From != nil {
+		where = append(where, "p.captured_at >= "+arg(*q.From))
+	}
+	if q.Before != nil {
+		where = append(where, "p.captured_at < "+arg(*q.Before))
+	}
+	if len(where) == 0 {
+		return ""
+	}
+	return "WHERE " + strings.Join(where, " AND ")
+}
+
+// YearCount is the number of photos captured in a year.
+type YearCount struct {
+	Year   int `json:"year"`
+	Photos int `json:"photos"`
+}
+
+// Years counts the photos matching q's filters per capture year, newest
+// year first. Photos without a date are left out.
+func (s *Store) Years(ctx context.Context, q Query) ([]YearCount, error) {
+	var args []any
+	arg := func(v any) string {
+		args = append(args, v)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	cond := whereClause(q, arg)
+	if cond == "" {
+		cond = "WHERE p.captured_at IS NOT NULL"
+	} else {
+		cond += " AND p.captured_at IS NOT NULL"
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT extract(year FROM p.captured_at)::int AS year, count(*)::int
+		FROM photos p `+cond+` GROUP BY 1 ORDER BY 1 DESC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	years, err := pgx.CollectRows(rows, pgx.RowToStructByPos[YearCount])
+	if err != nil {
+		return nil, err
+	}
+	if years == nil {
+		years = []YearCount{}
+	}
+	return years, nil
 }
 
 // attachTags fills in the tags of each result with a single query.

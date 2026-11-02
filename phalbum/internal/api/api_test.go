@@ -79,6 +79,11 @@ func (f *fakeLibrary) TagPhotos(_ context.Context, ids, add []string, remove []i
 	return nil
 }
 
+func (f *fakeLibrary) Years(_ context.Context, q library.Query) ([]library.YearCount, error) {
+	f.lastQuery = q
+	return []library.YearCount{{Year: 2024, Photos: 3}, {Year: 2022, Photos: 1}}, nil
+}
+
 func axis(i int) []float32 {
 	v := make([]float32, 512)
 	v[i] = 1
@@ -153,9 +158,46 @@ func TestListPhotosParsing(t *testing.T) {
 		t.Errorf("response = %s", rec.Body)
 	}
 
-	for _, bad := range []string{"from=yesterday", "to=2024-13-01", "limit=ten", "similar_to=nope"} {
+	if f.lib.lastQuery.Ascending {
+		t.Error("default sort should be newest first")
+	}
+	f.do("GET", "/api/photos?sort=asc", nil, "")
+	if !f.lib.lastQuery.Ascending {
+		t.Error("sort=asc not applied")
+	}
+
+	for _, bad := range []string{"from=yesterday", "to=2024-13-01", "limit=ten", "similar_to=nope", "sort=up"} {
 		if rec := f.do("GET", "/api/photos?"+bad, nil, ""); rec.Code != 400 {
 			t.Errorf("%s: status %d", bad, rec.Code)
+		}
+	}
+}
+
+func TestYears(t *testing.T) {
+	f := newFixture()
+	rec := f.do("GET", "/api/years?tags=Paris", nil, "")
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != `{"years":[{"year":2024,"photos":3},{"year":2022,"photos":1}]}` {
+		t.Errorf("body = %s", got)
+	}
+	if strings.Join(f.lib.lastQuery.Tags, ",") != "Paris" {
+		t.Errorf("tags = %v", f.lib.lastQuery.Tags)
+	}
+}
+
+func TestStaticFallback(t *testing.T) {
+	static := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "app") })
+	h := (&Server{Library: &fakeLibrary{}, Static: static, Log: log.New(io.Discard, "", 0)}).Handler()
+	for target, want := range map[string]int{"/": 200, "/photo/x": 200, "/api/nope": 404, "/api/tags": 200} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", target, nil))
+		if rec.Code != want {
+			t.Errorf("%s: status %d, want %d", target, rec.Code, want)
+		}
+		if strings.HasPrefix(target, "/api/") && rec.Body.String() == "app" {
+			t.Errorf("%s served by the web app", target)
 		}
 	}
 }

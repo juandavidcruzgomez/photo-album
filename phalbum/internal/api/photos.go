@@ -41,7 +41,7 @@ func withURLs(r library.Result) photo {
 }
 
 // listPhotos browses or searches with query parameters:
-// q, similar_to, tags, from, to, limit, offset.
+// q, similar_to, tags, from, to, sort, limit, offset.
 func (s *Server) listPhotos(w http.ResponseWriter, r *http.Request) {
 	s.search(w, r, nil)
 }
@@ -136,7 +136,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request, imageEmb []float
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// parseFilters reads tags, from, to, limit and offset.
+// parseFilters reads tags, from, to, sort, limit and offset.
 func parseFilters(r *http.Request) (library.Query, error) {
 	q := library.Query{Limit: defaultLimit}
 	if err := r.ParseForm(); err != nil {
@@ -167,6 +167,13 @@ func parseFilters(r *http.Request) (library.Query, error) {
 			t = t.Add(time.Nanosecond)
 		}
 		q.Before = &t
+	}
+	switch r.FormValue("sort") {
+	case "", "desc":
+	case "asc":
+		q.Ascending = true
+	default:
+		return q, errBadRequest(`sort: use "asc" or "desc"`)
 	}
 	var err error
 	if q.Limit, err = intParam(r, "limit", defaultLimit); err != nil {
@@ -229,6 +236,22 @@ func combine(vectors [][]float32) []float32 {
 		}
 	}
 	return out
+}
+
+// listYears counts photos per capture year, with the same tag and date
+// filters as listPhotos.
+func (s *Server) listYears(w http.ResponseWriter, r *http.Request) {
+	q, err := parseFilters(r)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	years, err := s.Library.Years(r.Context(), q)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"years": years})
 }
 
 func (s *Server) getPhoto(w http.ResponseWriter, r *http.Request) {
