@@ -1,4 +1,26 @@
 
+# The app's images (api with the web UI, indexer, crawler) are built from
+# ../phalbum/Dockerfile. They read photos from PHOTOS_ROOT (default: your home
+# directory), mounted read-only at the same path, because the crawler saves
+# absolute paths that the indexer and api open later.
+x-phalbum: &phalbum
+  env_file:
+    - ../phalbum/.env
+  environment:
+    POSTGRES_HOST: db
+    POSTGRES_PORT: "5432"
+    S3_ENDPOINT: http://seaweedfs-s3:8333
+    STORE_ORIGINALS: ${STORE_ORIGINALS:-false}
+  # The owner of the photos, so private directories (mode 700) are readable.
+  user: "${PHOTOS_UID:-1000}:${PHOTOS_GID:-1000}"
+  volumes:
+    - ${PHOTOS_ROOT:-${HOME}}:${PHOTOS_ROOT:-${HOME}}:ro
+  depends_on:
+    db:
+      condition: service_healthy
+    seaweedfs-s3:
+      condition: service_started
+
 services:
 
   # These are the minimal services required for SeaweedFS
@@ -82,6 +104,41 @@ services:
       - 5432:5432
     env_file:
       - ../phalbum/.env
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Search API and web UI on http://localhost:8090
+  api:
+    <<: *phalbum
+    build:
+      context: ../phalbum
+      target: api
+    image: phalbum-api
+    ports:
+      - 8090:8090
+    restart: unless-stopped
+
+  # Waits for jobs queued by the crawler and indexes them.
+  indexer:
+    <<: *phalbum
+    build:
+      context: ../phalbum
+      target: indexer
+    image: phalbum-indexer
+    restart: unless-stopped
+
+  # On demand, not started by `up`:
+  #   docker compose -f docker/docker-compose.local.yml run --rm crawler /path/under/PHOTOS_ROOT
+  crawler:
+    <<: *phalbum
+    build:
+      context: ../phalbum
+      target: crawler
+    image: phalbum-crawler
+    profiles: [tools]
 
   adminer:
     image: adminer
