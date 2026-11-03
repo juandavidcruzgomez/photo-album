@@ -1,0 +1,15 @@
+# Keep the build context small and secrets out of images.
+.env
+*.env
+bin/
+main
+models/
+web/node_modules/
+web/dist/*
+!web/dist/.gitkeep
+web/*.tsbuildinfo
+# Empty scaffolding
+admin/
+build/
+deployments/
+pkg/

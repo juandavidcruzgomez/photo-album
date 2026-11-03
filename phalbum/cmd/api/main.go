@@ -1,6 +1,7 @@
 // Command api serves the search API and the web app.
 //
 //	go run ./cmd/api [-addr :8090]
+//	api -healthcheck   # exit 0 if the API at -addr answers /api/health (for Docker)
 package main
 
 import (
@@ -9,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -41,7 +43,11 @@ func run() error {
 	dsn := flag.String("db", "", "Postgres connection string (default: from settings)")
 	lib := flag.String("lib", cfg.OnnxLib, "path to the ONNX Runtime shared library")
 	models := flag.String("models", cfg.ModelsDir, "directory with the CLIP ONNX models and tokenizer files")
+	healthcheck := flag.Bool("healthcheck", false, "check that the API running at -addr is healthy, then exit")
 	flag.Parse()
+	if *healthcheck {
+		return checkHealth(*addr)
+	}
 	if *dsn == "" {
 		*dsn = cfg.DSN()
 	}
@@ -97,6 +103,28 @@ func run() error {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
+	}
+	return nil
+}
+
+// checkHealth asks a running API for its health, so container images need
+// no curl.
+func checkHealth(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+	}
+	client := http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://" + net.JoinHostPort(host, port) + "/api/health")
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("health: %s", resp.Status)
 	}
 	return nil
 }
