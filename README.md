@@ -62,6 +62,34 @@ make gen-api    # regenerate web/src/api/schema.d.ts after changing api/openapi.
 
 Without a web build, the API still works and `/` answers 503 with a hint to build the app.
 
+## Running with Docker
+
+`docker/docker-compose.local.yml` runs the whole system: SeaweedFS, Postgres (pgvector), the
+`api` (with the web UI, on http://localhost:8090), and an always-on `indexer` that waits for
+jobs. The `crawler` runs on demand. Database credentials come from `phalbum/.env`.
+
+The images are built from `phalbum/Dockerfile`. It builds the web app and the Go binaries, and
+bakes the ONNX Runtime library and CLIP models (`scripts/fetch-models.sh`) into the `api` and
+`indexer` images, for the CPU architecture of the machine that builds them. Build on the
+Raspberry Pi (or use `docker buildx build --platform linux/arm64`) to get arm64 images.
+
+```sh
+cd phalbum
+make up                         # build the images and start everything
+make crawl DIR=~/Pictures       # queue a folder; the indexer picks the jobs up
+```
+
+The crawler saves absolute paths, and the indexer and api open those files later. So all three
+containers mount `PHOTOS_ROOT` (default: your home directory) read-only **at the same path**,
+and the crawler can start from any folder below it. Settings (environment, or a `docker/.env`
+file):
+
+| Variable          | Default   | Meaning                                                        |
+|-------------------|-----------|----------------------------------------------------------------|
+| `PHOTOS_ROOT`     | `$HOME`   | Folder tree the containers can read photos from                |
+| `PHOTOS_UID/GID`  | `1000`    | User the containers run as; must be able to read the photos    |
+| `STORE_ORIGINALS` | `false`   | Copy originals into SeaweedFS, so they're served without the disk |
+
 ## Seaweedfs
 This is the storage layer of the system. The goal of SeaweedFS is to make O(1) disk access. This
 is done by the separation of the data and metadata paths.
