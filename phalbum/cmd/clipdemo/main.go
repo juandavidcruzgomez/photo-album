@@ -21,6 +21,7 @@ import (
 func main() {
 	lib := flag.String("lib", "models/libonnxruntime.so.1.31.0", "path to the ONNX Runtime shared library")
 	models := flag.String("models", "models/clip-vit-base-patch32", "directory with the CLIP ONNX models and tokenizer files")
+	textModels := flag.String("text-models", "", "directory with the multilingual text model, e.g. models/clip-ViT-B-32-multilingual-v1")
 	imagePath := flag.String("image", "", "image to embed")
 	flag.Parse()
 	queries := flag.Args()
@@ -43,7 +44,11 @@ func main() {
 		log.Fatal(err)
 	}
 	defer embedding.Shutdown()
-	clip, err := embedding.New(embedding.DefaultConfig(*models))
+	cfg := embedding.DefaultConfig(*models)
+	if *textModels != "" {
+		cfg = cfg.WithMultilingualText(*textModels)
+	}
+	clip, err := embedding.New(cfg)
 	if err != nil {
 		log.Fatal(err)
 	}

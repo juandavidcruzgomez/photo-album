@@ -43,6 +43,7 @@ func run() error {
 	dsn := flag.String("db", "", "Postgres connection string (default: from settings)")
 	lib := flag.String("lib", cfg.OnnxLib, "path to the ONNX Runtime shared library")
 	models := flag.String("models", cfg.ModelsDir, "directory with the CLIP ONNX models and tokenizer files")
+	textModels := flag.String("text-models", cfg.TextModelsDir, "directory with the multilingual text model; empty uses CLIP's English text model")
 	healthcheck := flag.Bool("healthcheck", false, "check that the API running at -addr is healthy, then exit")
 	flag.Parse()
 	if *healthcheck {
@@ -75,7 +76,11 @@ func run() error {
 		return fmt.Errorf("onnx runtime: %w", err)
 	}
 	defer embedding.Shutdown()
-	clip, err := embedding.New(embedding.DefaultConfig(*models))
+	clipCfg := embedding.DefaultConfig(*models)
+	if *textModels != "" {
+		clipCfg = clipCfg.WithMultilingualText(*textModels)
+	}
+	clip, err := embedding.New(clipCfg)
 	if err != nil {
 		return err
 	}

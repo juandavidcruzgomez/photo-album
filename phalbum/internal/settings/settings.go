@@ -42,6 +42,9 @@ type Settings struct {
 	// CLIP model files used by the indexer and the API.
 	OnnxLib   string
 	ModelsDir string
+	// TextModelsDir, when set, makes the API embed search text with the
+	// multilingual encoder in this directory instead of CLIP's English one.
+	TextModelsDir string
 
 	// Search API.
 	APIAddr     string
@@ -74,6 +77,7 @@ func Load() (*Settings, error) {
 		StoreOriginals:   storeOriginals,
 		OnnxLib:          getenv("ONNX_LIB", "models/libonnxruntime.so.1.31.0"),
 		ModelsDir:        getenv("CLIP_MODELS_DIR", "models/clip-vit-base-patch32"),
+		TextModelsDir:    os.Getenv("CLIP_TEXT_MODELS_DIR"),
 		APIAddr:          getenv("API_ADDR", ":8090"),
 		CORSOrigins:      splitList(getenv("CORS_ORIGINS", "*")),
 	}, nil
