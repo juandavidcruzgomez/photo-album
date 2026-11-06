@@ -73,6 +73,11 @@ bakes the ONNX Runtime library and CLIP models (`scripts/fetch-models.sh`) into 
 `indexer` images, for the CPU architecture of the machine that builds them. Build on the
 Raspberry Pi (or use `docker buildx build --platform linux/arm64`) to get arm64 images.
 
+Text search is multilingual (English, French and 50+ other languages): the `api` image sets
+`CLIP_TEXT_MODELS_DIR` to `sentence-transformers/clip-ViT-B-32-multilingual-v1`, a text
+encoder distilled into the same embedding space as CLIP's image encoder, so existing photo
+embeddings work without reindexing. Unset it to go back to CLIP's English-only text encoder.
+
 ```sh
 cd phalbum
 make up                         # build the images and start everything

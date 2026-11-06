@@ -53,11 +53,14 @@ USER phalbum
 
 FROM base AS clip
 ENV ONNX_LIB=/opt/phalbum/models/libonnxruntime.so.1.31.0 \
-    CLIP_MODELS_DIR=/opt/phalbum/models/clip-vit-base-patch32
+    CLIP_MODELS_DIR=/opt/phalbum/models/clip-vit-base-patch32 \
+    CLIP_TEXT_MODELS_DIR=/opt/phalbum/models/clip-ViT-B-32-multilingual-v1
 COPY --from=models /src/models /opt/phalbum/models
 # Fail the build, not the container, if a model file is missing.
 RUN for f in "$ONNX_LIB" "$CLIP_MODELS_DIR"/vision_model_quantized.onnx "$CLIP_MODELS_DIR"/text_model_quantized.onnx \
-      "$CLIP_MODELS_DIR"/vocab.json "$CLIP_MODELS_DIR"/merges.txt; do \
+      "$CLIP_MODELS_DIR"/vocab.json "$CLIP_MODELS_DIR"/merges.txt \
+      "$CLIP_TEXT_MODELS_DIR"/text_model_quantized.onnx "$CLIP_TEXT_MODELS_DIR"/vocab.txt \
+      "$CLIP_TEXT_MODELS_DIR"/dense.safetensors; do \
       test -s "$f" || { echo "missing $f" >&2; exit 1; }; \
     done
 
