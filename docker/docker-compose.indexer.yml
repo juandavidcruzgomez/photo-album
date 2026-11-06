@@ -1,0 +1,30 @@
+# The PC side of the split deployment: only the indexer, using the database and
+# storage on the Raspberry Pi (docker-compose.rpi.yml). While this machine is
+# off, jobs queue up in Postgres. See "Raspberry Pi + PC" in the README.
+#   docker compose --env-file indexer.env -f docker-compose.indexer.yml up -d --build
+
+name: phalbum-indexer
+
+services:
+  # Exits if the Pi can't be reached at startup; the restart policy retries.
+  indexer:
+    build:
+      context: ../phalbum
+      target: indexer
+    image: phalbum-indexer
+    restart: unless-stopped
+    environment:
+      PHOTOS_ROOT: ${PHOTOS_ROOT:?}
+      POSTGRES_USER: ${POSTGRES_USER:?}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      POSTGRES_HOST: ${RPI_HOST:?}
+      POSTGRES_PORT: "5432"
+      S3_ENDPOINT: http://${RPI_HOST:?}:8333
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?}
+      STORE_ORIGINALS: ${STORE_ORIGINALS:-true}
+    # The owner of the photos, so private directories (mode 700) are readable.
+    user: "${PHOTOS_UID:-1000}:${PHOTOS_GID:-1000}"
+    volumes:
+      - ${PHOTOS_ROOT:?}:${PHOTOS_ROOT:?}:ro

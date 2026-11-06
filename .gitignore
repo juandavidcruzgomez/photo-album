@@ -5,3 +5,5 @@ data/**
 phalbum/models/
 main
 phalbum/bin/
+docker/*.env
+docker/s3.json

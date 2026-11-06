@@ -450,6 +450,15 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            /** @description This server runs without the vision model */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
         };
     };
     tagPhotos: {

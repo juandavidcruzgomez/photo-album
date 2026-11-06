@@ -21,6 +21,7 @@ import (
 
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/api"
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/embedding"
+	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/health"
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/library"
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/settings"
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/storage"
@@ -44,6 +45,9 @@ func run() error {
 	lib := flag.String("lib", cfg.OnnxLib, "path to the ONNX Runtime shared library")
 	models := flag.String("models", cfg.ModelsDir, "directory with the CLIP ONNX models and tokenizer files")
 	textModels := flag.String("text-models", cfg.TextModelsDir, "directory with the multilingual text model; empty uses CLIP's English text model")
+	threads := flag.Int("threads", cfg.OnnxThreads, "ONNX Runtime threads (0 lets it decide)")
+	noVision := flag.Bool("no-vision", cfg.DisableVision, "don't load the vision model, saving memory; disables searching by an uploaded picture")
+	check := flag.Bool("check", false, "check the connections to the database, storage, photos and model files, then exit")
 	healthcheck := flag.Bool("healthcheck", false, "check that the API running at -addr is healthy, then exit")
 	flag.Parse()
 	if *healthcheck {
@@ -51,6 +55,23 @@ func run() error {
 	}
 	if *dsn == "" {
 		*dsn = cfg.DSN()
+	}
+	s3Cfg := storage.S3Config{
+		Endpoint: cfg.S3Endpoint, Region: cfg.S3Region, Bucket: cfg.S3Bucket,
+		AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey,
+	}
+	clipCfg := embedding.DefaultConfig(*models)
+	if *textModels != "" {
+		clipCfg = clipCfg.WithMultilingualText(*textModels)
+	}
+	clipCfg.Threads = *threads
+	if *noVision {
+		clipCfg.VisionModel = ""
+	}
+	if *check {
+		return health.Run(context.Background(), os.Stdout,
+			health.Database(*dsn), health.Storage(s3Cfg), health.Photos(cfg.PhotosRoot),
+			health.Files("models", append(clipCfg.Files(), *lib)...))
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -65,10 +86,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("database: %w", err)
 	}
-	objects, err := storage.NewS3(ctx, storage.S3Config{
-		Endpoint: cfg.S3Endpoint, Region: cfg.S3Region, Bucket: cfg.S3Bucket,
-		AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey,
-	})
+	objects, err := storage.NewS3(ctx, s3Cfg)
 	if err != nil {
 		return fmt.Errorf("storage: %w", err)
 	}
@@ -76,10 +94,6 @@ func run() error {
 		return fmt.Errorf("onnx runtime: %w", err)
 	}
 	defer embedding.Shutdown()
-	clipCfg := embedding.DefaultConfig(*models)
-	if *textModels != "" {
-		clipCfg = clipCfg.WithMultilingualText(*textModels)
-	}
 	clip, err := embedding.New(clipCfg)
 	if err != nil {
 		return err
@@ -90,7 +104,7 @@ func run() error {
 		Addr: *addr,
 		Handler: (&api.Server{
 			Library: photos, Embedder: clip, Objects: objects, Static: web.Handler(),
-			Ping: pool.Ping, CORSOrigins: cfg.CORSOrigins,
+			Ping: pool.Ping, CORSOrigins: cfg.CORSOrigins, NoImageSearch: *noVision,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

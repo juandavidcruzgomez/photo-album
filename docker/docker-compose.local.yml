@@ -11,6 +11,7 @@ x-phalbum: &phalbum
     POSTGRES_PORT: "5432"
     S3_ENDPOINT: http://seaweedfs-s3:8333
     STORE_ORIGINALS: ${STORE_ORIGINALS:-false}
+    PHOTOS_ROOT: ${PHOTOS_ROOT:-${HOME}}
   # The owner of the photos, so private directories (mode 700) are readable.
   user: "${PHOTOS_UID:-1000}:${PHOTOS_GID:-1000}"
   volumes:

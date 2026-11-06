@@ -137,6 +137,20 @@ func (f *fixture) do(method, target string, body io.Reader, contentType string) 
 	return rec
 }
 
+func TestSearchByImageDisabled(t *testing.T) {
+	emb := &fakeEmbedder{}
+	s := &Server{Library: &fakeLibrary{}, Embedder: emb, NoImageSearch: true, Log: log.New(io.Discard, "", 0)}
+	req := httptest.NewRequest("POST", "/api/photos/search", strings.NewReader("ignored"))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != 503 || !strings.Contains(rec.Body.String(), "not available") {
+		t.Errorf("got %d %s", rec.Code, rec.Body)
+	}
+	if emb.images != 0 {
+		t.Error("embedder was called")
+	}
+}
+
 func TestListPhotosParsing(t *testing.T) {
 	f := newFixture()
 	rec := f.do("GET", "/api/photos?tags=Paris,%202024&tags=beach&from=2024-01-01&to=2024-12-31&limit=500&offset=-3", nil, "")

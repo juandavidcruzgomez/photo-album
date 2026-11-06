@@ -49,6 +49,10 @@ func (s *Server) listPhotos(w http.ResponseWriter, r *http.Request) {
 // searchByImage searches with an uploaded picture (multipart field "image"),
 // plus the same optional fields as listPhotos.
 func (s *Server) searchByImage(w http.ResponseWriter, r *http.Request) {
+	if s.NoImageSearch {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "searching by image is not available on this server"})
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxUpload+1<<20)
 	if err := r.ParseMultipartForm(maxUpload); err != nil {
 		s.writeError(w, r, errBadRequest("expected a multipart form with an image under 20 MB"))

@@ -79,6 +79,24 @@ func (cfg Config) WithMultilingualText(modelDir string) Config {
 	return cfg
 }
 
+// Files returns the model files cfg needs.
+func (cfg Config) Files() []string {
+	var files []string
+	if cfg.VisionModel != "" {
+		files = append(files, cfg.VisionModel)
+	}
+	if cfg.TextModel != "" {
+		files = append(files, cfg.TextModel, cfg.Vocab)
+		if cfg.Merges != "" {
+			files = append(files, cfg.Merges)
+		}
+		if cfg.Dense != "" {
+			files = append(files, cfg.Dense)
+		}
+	}
+	return files
+}
+
 // CLIP embeds images and text into the same vector space.
 type CLIP struct {
 	vision    *ort.DynamicAdvancedSession

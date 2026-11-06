@@ -66,6 +66,7 @@ paths:
       responses:
         "200": { description: A page of photos, content: { application/json: { schema: { $ref: "#/components/schemas/PhotoList" } } } }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "503": { description: This server runs without the vision model, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
 
   /api/photos/tags:
     post:

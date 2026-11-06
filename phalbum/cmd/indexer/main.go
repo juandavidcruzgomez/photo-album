@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/embedding"
+	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/health"
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/indexer"
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/jobs"
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/library"
@@ -44,9 +45,22 @@ func run() error {
 	models := flag.String("models", cfg.ModelsDir, "directory with the CLIP ONNX models")
 	threads := flag.Int("threads", 0, "ONNX Runtime threads (0 lets it decide)")
 	retryFailed := flag.Bool("retry-failed", false, "queue failed jobs again before starting")
+	check := flag.Bool("check", false, "check the connections to the database, storage, photos and model files, then exit")
 	flag.Parse()
 	if *dsn == "" {
 		*dsn = cfg.DSN()
+	}
+	s3Cfg := storage.S3Config{
+		Endpoint: cfg.S3Endpoint, Region: cfg.S3Region, Bucket: cfg.S3Bucket,
+		AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey,
+	}
+	clipCfg := embedding.DefaultConfig(*models)
+	clipCfg.TextModel = "" // only images are embedded here
+	clipCfg.Threads = *threads
+	if *check {
+		return health.Run(context.Background(), os.Stdout,
+			health.Database(*dsn), health.Storage(s3Cfg), health.Photos(cfg.PhotosRoot),
+			health.Files("models", append(clipCfg.Files(), *lib)...))
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -74,10 +88,7 @@ func run() error {
 		fmt.Fprintf(os.Stderr, "requeued %d failed jobs\n", n)
 	}
 
-	objects, err := storage.NewS3(ctx, storage.S3Config{
-		Endpoint: cfg.S3Endpoint, Region: cfg.S3Region, Bucket: cfg.S3Bucket,
-		AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey,
-	})
+	objects, err := storage.NewS3(ctx, s3Cfg)
 	if err != nil {
 		return fmt.Errorf("storage: %w", err)
 	}
@@ -86,9 +97,6 @@ func run() error {
 		return fmt.Errorf("onnx runtime: %w", err)
 	}
 	defer embedding.Shutdown()
-	clipCfg := embedding.DefaultConfig(*models)
-	clipCfg.TextModel = "" // only images are embedded here
-	clipCfg.Threads = *threads
 	clip, err := embedding.New(clipCfg)
 	if err != nil {
 		return err

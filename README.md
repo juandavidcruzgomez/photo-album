@@ -1,82 +1,345 @@
 # Photo album
-This application is meant to index all the photos and images that are scattered over different 
-disks and applications.
 
-The system is composed of trhee systems:
+A self-hosted photo library for pictures scattered across disks and applications. It indexes them
+with CLIP so you can find photos by describing them, in English, French and 50+ other languages,
+without tagging anything first.
 
-1. A crawler, to get the photos from a file system
-1. An indexer, that takes the picture files and creates a multimodal embedding using CLIP
-1. A web app, used to search and tag the photos. This web app has a back and a front end.
+- **Search by text** ("deux chats sur un canapé"), **by an uploaded picture**, or with **"more like
+  this"**, combined with tag and date filters.
+- **Browse by date**, grouped by year, and tag photos one at a time or in bulk. Folder names become
+  tags automatically.
+- **Split the work across machines:** the library can live on a Raspberry Pi while a stronger PC does
+  the indexing whenever it's on.
 
-The photos, during crawling are taken and stored on a S3 like storage system. Ussually I would
-use MinIO, but since May 2026 the prject was archived. For thisproject I'll use (SeaweedFS)[https://github.com/seaweedfs/seaweedfs]
-which uses the same concepts of Facebook Haystack, it's OSS and it's written in GO.
+**Contents:** [Architecture](#architecture) · [Quick start](#quick-start) ·
+[Raspberry Pi + PC](#raspberry-pi--pc) · [Configuration](#configuration) ·
+[Development](#development) · [SeaweedFS](#seaweedfs)
 
-This project is packaged using Docker and should be able to run in a RaspberryPI (Except for the indexer).
+## Architecture
 
-This means, the indexer should be able to run as a separate service that can act during some schedule.
+### Overview
 
-This could be the order:
+Three programs written in Go cooperate through two shared services. They never call each other
+directly: Postgres holds the job queue and the library, and S3 storage holds the image files.
 
-1. The crawler starts retrieving and copying the files on the S3 storage.
-1. Once a file is created, an indexing job is registered on the indexing queue. 
-1. The indexer starts picking indexation jobs from the queue
-1. Once the indexation is done, the job is marked done and the index is updated.
+```mermaid
+flowchart LR
+    user(["Browser"])
+    files[("Source photos<br/>disk or NAS")]
 
-The job should contain:
+    subgraph apps["Programs"]
+        crawler["crawler<br/><i>runs on demand</i>"]
+        indexer["indexer<br/><i>always on, or -once</i>"]
+        api["api + web app<br/><i>always on</i>"]
+    end
 
-```json
-{
-    "job_id":"UID()",
-    "uri": "S3 file path",
-    "filename": "The name of the file",
-    "created_at": Date,
-    "updated_at": Date,
-    "status": "queued"|"processing"|"success"|"error",
-    "message": "Some message"
-}
+    subgraph services["Shared services"]
+        db[("Postgres + pgvector<br/>queue and library")]
+        s3[("SeaweedFS (S3)<br/>thumbnails and originals")]
+    end
 
+    crawler -- "walks and hashes" --> files
+    crawler -- "queues jobs" --> db
+    db -- "claims jobs" --> indexer
+    indexer -- "reads photos" --> files
+    indexer -- "saves embedding<br/>and metadata" --> db
+    indexer -- "stores images" --> s3
+    user -- "HTTP :8090" --> api
+    api -- "searches" --> db
+    api -- "streams images" --> s3
+    api -. "originals not in S3" .-> files
 ```
 
-## Web app
+| Component | What it does | CLIP model loaded | Needs |
+|---|---|---|---|
+| **crawler** ([`cmd/crawler`](phalbum/cmd/crawler)) | Finds images, hashes new or changed files, queues one job per unique content | None | Postgres, photos |
+| **indexer** ([`cmd/indexer`](phalbum/cmd/indexer)) | Turns jobs into searchable photos: embedding, thumbnail, metadata, tags | Image encoder | Postgres, S3, photos |
+| **api** ([`cmd/api`](phalbum/cmd/api)) | Serves the REST API and the web app from one process | Text encoder and image encoder | Postgres, S3, and photos unless originals are in S3 |
+| **web app** ([`phalbum/web`](phalbum/web)) | Browser UI, embedded into the `api` binary at build time | None | The API |
+| **Postgres + pgvector** | Job queue, library, tags and the vector index | | |
+| **SeaweedFS** | S3-compatible storage for thumbnails and, optionally, originals | | |
 
-The browser UI lives in `phalbum/web`: React 19 + Vite + Tailwind CSS v4 + shadcn/ui, with
-TanStack Query for data and wouter for routing. It is a static single-page app: `npm run build`
-writes `web/dist`, which is embedded into the `api` binary (`go:embed`), so one process serves both
-the API and the app on the same origin.
+### Indexing a photo
 
-- Browse by date (grouped by year, with a year jump bar), search by text, by an uploaded picture,
-  or "more like this", and filter by tags and dates. All filters live in the URL.
-- Tag one photo from the viewer's info panel, or select several (long-press on touch, the
-  check mark or shift-click on desktop) and tag them at once. Tags are managed at `/tags`.
-- `/admin` is reserved for the future administration UI.
+```mermaid
+sequenceDiagram
+    participant C as crawler
+    participant F as Source photos
+    participant DB as Postgres
+    participant I as indexer
+    participant S as S3
 
-Requires Node 20.19+ (see `web/.nvmrc`).
-
-```sh
-cd phalbum
-make api        # npm ci + build the web app, then go build -o bin/api ./cmd/api
-make dev-web    # Vite on http://localhost:5173 with hot reload; proxies /api to :8090
-make gen-api    # regenerate web/src/api/schema.d.ts after changing api/openapi.yaml
+    C->>F: Walk the tree, read EXIF
+    C->>DB: Load known files
+    C->>F: Hash new or changed files (SHA-256)
+    C->>DB: Record the path, queue a job (once per hash)
+    DB-->>I: NOTIFY index_jobs
+    I->>DB: Claim the oldest queued job
+    I->>F: Read the file, verify its hash
+    I->>I: Decode, compute embedding, make thumbnail
+    I->>S: Put thumbnail (and original if enabled)
+    I->>DB: Save photo and tags, mark the job done
 ```
 
-Without a web build, the API still works and `/` answers 503 with a hint to build the app.
+1. **Crawl.** The crawler walks the tree, keeping files with an image extension (`jpg`, `png`, `gif`,
+   `webp`, `bmp`, `tiff`, `heic`, `avif`). A file whose path, size and modification time match the last
+   crawl is skipped without being read, which makes repeat crawls fast. The folders between the crawl
+   root and a file become its tags.
+2. **Queue.** Each new file is recorded in `crawled_files` and queued in `index_jobs`. Jobs are unique
+   per SHA-256 content hash, so a photo copied to several folders is indexed once and remembers all its
+   paths.
+3. **Claim.** The indexer takes the oldest queued job. A Postgres `NOTIFY` wakes it immediately, and it
+   also polls once a minute in case a notification is missed. Several indexers could safely run at
+   once.
+4. **Process.** The indexer reads the file and rejects it if its content changed since the crawl. It
+   then decodes it, applying the EXIF orientation, and shrinks a working copy to 512 px on the short
+   side. If a JPEG's main image is corrupt, it falls back to the largest embedded preview. From that
+   copy it computes the embedding and a 512 px JPEG thumbnail.
+5. **Store.** The thumbnail goes to S3, plus the original when `STORE_ORIGINALS` is on. The embedding,
+   EXIF-derived metadata (date, camera, GPS) and tags go to Postgres.
 
-## Running with Docker
+The queue is what lets the indexer live elsewhere: while it's off, jobs just wait.
 
-`docker/docker-compose.local.yml` runs the whole system: SeaweedFS, Postgres (pgvector), the
-`api` (with the web UI, on http://localhost:8090), and an always-on `indexer` that waits for
-jobs. The `crawler` runs on demand. Database credentials come from `phalbum/.env`.
+### Searching
 
-The images are built from `phalbum/Dockerfile`. It builds the web app and the Go binaries, and
-bakes the ONNX Runtime library and CLIP models (`scripts/fetch-models.sh`) into the `api` and
-`indexer` images, for the CPU architecture of the machine that builds them. Build on the
-Raspberry Pi (or use `docker buildx build --platform linux/arm64`) to get arm64 images.
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant A as api
+    participant DB as Postgres
+    participant S as S3
 
-Text search is multilingual (English, French and 50+ other languages): the `api` image sets
-`CLIP_TEXT_MODELS_DIR` to `sentence-transformers/clip-ViT-B-32-multilingual-v1`, a text
-encoder distilled into the same embedding space as CLIP's image encoder, so existing photo
-embeddings work without reindexing. Unset it to go back to CLIP's English-only text encoder.
+    B->>A: GET /api/photos?q=chats&tags=Paris
+    A->>A: Embed the text (512 numbers)
+    A->>DB: Nearest neighbours by cosine distance, with filters
+    DB-->>A: Page of photos with scores
+    A-->>B: JSON
+    B->>A: GET /api/photos/{id}/thumbnail
+    A->>S: Get the object
+    S-->>A: JPEG
+    A-->>B: JPEG, cached as immutable
+```
+
+- **One shared vector space.** Text and images are embedded into the same 512-dimensional space, so a
+  sentence and a photo that mean the same thing end up close together. Search is a nearest-neighbour
+  lookup.
+- **Combined queries.** Text, an uploaded picture and "more like this" can be used together: their
+  vectors are averaged and renormalized into one query. "More like this" uses the stored embedding, so
+  it needs no model.
+- **Filters and ordering.** pgvector's HNSW index finds candidates, and iterative scanning keeps it
+  searching until enough rows pass the tag and date filters. Candidates are then sorted by exact
+  distance. Without a query vector, photos are listed by date.
+- **Dates.** `captured_at` is the EXIF date, falling back to the file's modification time, so photos
+  without EXIF can still be browsed and filtered.
+- **Originals.** The API streams from S3 if the original was stored there. Otherwise it tries each
+  known source path on disk.
+- **Serialized inference.** Embedding calls run one at a time in each API process, which keeps memory
+  predictable on small machines.
+
+### Embedding models
+
+Models run in-process through [ONNX Runtime](https://onnxruntime.ai/) via
+[`onnxruntime_go`](https://github.com/yalue/onnxruntime_go), with no Python at runtime. The tokenizers
+are implemented in pure Go in [`internal/embedding`](phalbum/internal/embedding).
+[`scripts/fetch-models.sh`](phalbum/scripts/fetch-models.sh) downloads quantized models for the target
+CPU.
+
+| Role | Model | Details |
+|---|---|---|
+| Images | [`Xenova/clip-vit-base-patch32`](https://huggingface.co/Xenova/clip-vit-base-patch32) | OpenAI CLIP ViT-B/32, 224 px input |
+| Text, multilingual (default in Docker) | [`sentence-transformers/clip-ViT-B-32-multilingual-v1`](https://huggingface.co/sentence-transformers/clip-ViT-B-32-multilingual-v1) | DistilBERT with mean pooling and a 768→512 projection, both run in Go |
+| Text, English only (default outside Docker) | `Xenova/clip-vit-base-patch32` | CLIP's own text encoder |
+
+The multilingual encoder was trained to match the CLIP image encoder's vector space. That's why the
+text model can be swapped without reindexing a single photo, and it's the one model choice that can be
+changed so cheaply. Changing the *image* model means reindexing everything, because stored embeddings
+are only comparable with vectors from the same space. Each photo records its model in `photos.model`
+to make that possible later.
+
+### Data model
+
+Each program applies its own idempotent schema at startup, under an advisory lock so that programs
+starting together don't race. There is no separate migration step.
+
+```mermaid
+erDiagram
+    crawled_files }o--|| photos : "content_hash"
+    index_jobs ||--o| photos : "content_hash"
+    photos ||--o{ photo_tags : ""
+    tags ||--o{ photo_tags : ""
+
+    crawled_files {
+        text path PK
+        bigint size
+        timestamptz mod_time
+        text content_hash
+    }
+    index_jobs {
+        uuid job_id PK
+        text content_hash UK
+        text uri
+        text status
+        text message
+        int attempts
+        text_array tags
+        jsonb exif
+    }
+    photos {
+        uuid id PK
+        text content_hash UK
+        text thumbnail_key
+        text original_key
+        timestamptz captured_at
+        vector_512 embedding
+        text model
+    }
+    tags {
+        bigserial id PK
+        text name
+    }
+    photo_tags {
+        uuid photo_id FK
+        bigint tag_id FK
+        text source
+    }
+```
+
+The diagram shows the main columns only. See the [jobs](phalbum/internal/jobs/schema.sql) and
+[library](phalbum/internal/library/schema.sql) schemas for the rest.
+
+- **Identity is the content hash.** The same bytes are one photo, however many paths they have.
+- **Job status** moves `queued` → `processing` → `success` or `error`, with the reason in `message`.
+- **Tag `source`** records where a tag came from: `path` (folder names), `user`, or `auto`. Tag names
+  are unique regardless of case.
+- **Object keys** use the first two hash characters as a prefix:
+  `thumbnails/ab/abcdef….jpg` and `originals/ab/abcdef….jpg`. Because content never changes under a
+  key, the API can serve images as cacheable forever.
+
+### REST API
+
+The contract is [`phalbum/api/openapi.yaml`](phalbum/api/openapi.yaml), and the web app's types are
+generated from it. Everything is under `/api`:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Liveness: the database is reachable |
+| `GET /photos` | List or search: `q`, `similar_to`, `tags`, `from`, `to`, `sort`, `limit`, `offset` |
+| `POST /photos/search` | Search with an uploaded picture, up to 20 MB, plus the same filters |
+| `GET /photos/{id}`, `/thumbnail`, `/original` | A photo's details and images |
+| `POST /photos/{id}/tags`, `DELETE /photos/{id}/tags/{tagID}` | Tag or untag one photo |
+| `POST /photos/tags` | Tag several photos at once |
+| `GET /years` | Photo counts per year, for the year jump bar |
+| `GET`/`POST /tags`, `PATCH`/`DELETE /tags/{id}` | Manage tags |
+
+### Web app
+
+A static single-page app in React 19, built with Vite, Tailwind CSS v4 and shadcn/ui, using TanStack
+Query for data and wouter for routing. `npm run build` writes `web/dist`, which is embedded in the
+`api` binary with `go:embed`, so one process serves both on the same origin.
+
+- All search filters live in the URL, so any search can be bookmarked or shared.
+- Select several photos by long-pressing on touch, or with the check mark or shift-click on desktop.
+- Tags are managed at `/tags`. `/admin` is reserved for a future administration UI.
+
+### Deployment layouts
+
+Because the programs only meet in Postgres and S3, where each one runs is a deployment choice:
+
+| | Single machine | Raspberry Pi + PC |
+|---|---|---|
+| Compose files | [`docker-compose.local.yml`](docker/docker-compose.local.yml) | [`docker-compose.rpi.yml`](docker/docker-compose.rpi.yml) and [`docker-compose.indexer.yml`](docker/docker-compose.indexer.yml) |
+| Postgres, SeaweedFS, api, crawler | This machine | Raspberry Pi |
+| Indexer | This machine | PC, reaching the Pi over the LAN |
+| Source photos | Local folders | NAS, mounted on both |
+| SeaweedFS | Separate containers, anonymous access, plus webdav, Prometheus and Adminer | One process, access keys, tuned for 1 GB of RAM |
+| Originals in S3 | Off by default | On, copied to the Pi's SSD |
+
+```mermaid
+flowchart TB
+    browser(["Browser on the LAN"])
+    nas[("NAS<br/>source photos")]
+
+    subgraph pi["Raspberry Pi (arm64)"]
+        api["api + web app"]
+        crawler["crawler"]
+        subgraph ssd["USB SSD"]
+            db[("Postgres")]
+            s3[("SeaweedFS")]
+        end
+    end
+
+    subgraph pc["PC (amd64)"]
+        indexer["indexer"]
+    end
+
+    browser -- ":8090" --> api
+    api --> db
+    api --> s3
+    crawler --> db
+    crawler -- "same path" --> nas
+    indexer -- ":5432" --> db
+    indexer -- ":8333" --> s3
+    indexer -- "same path" --> nas
+```
+
+**The same-path rule.** The crawler stores absolute `file://` paths, and the indexer later opens exactly
+those paths. So every container mounts `PHOTOS_ROOT` at the same path it has on the host, and all
+machines must mount the NAS at the same location.
+
+### Failure handling
+
+| Situation | What happens |
+|---|---|
+| Indexer stopped or PC off | Jobs wait in the queue, and search and browsing keep working |
+| Indexer dies mid-job | The job stays `processing`. When an indexer next starts, jobs older than 10 minutes are requeued |
+| A job fails (bad file, storage down) | The job is marked `error` with the reason and is not retried automatically. Requeue with `indexer -retry-failed` |
+| A file changes between crawl and indexing | The job fails with "content changed since crawl". The next crawl queues the new content |
+| Database unreachable at startup | The program exits, and the Docker restart policy retries it |
+| Lost connection while waiting for jobs | The indexer reconnects its listener on its own |
+| Any connectivity doubt | Run `-check` on the affected program. See [Check the connections](#check-the-connections) |
+
+### Limitations
+
+- **No login.** Anyone who can reach the web app can view and edit the library, so don't expose it to
+  the internet.
+- **No encryption in transit.** Postgres and S3 traffic is unencrypted. That's for a trusted LAN only;
+  use a VPN across networks.
+- **HEIC and AVIF aren't decoded yet.** The crawler finds them, but their jobs fail with "unsupported
+  format".
+- **Deleting a source file doesn't remove its photo** from the library.
+- **`STORE_ORIGINALS` isn't retroactive.** It only applies to photos indexed after it's turned on.
+
+### Code layout
+
+```text
+phalbum/
+├── cmd/
+│   ├── api/          HTTP server for the API and web app
+│   ├── crawler/      Walks folders and queues jobs
+│   ├── indexer/      Processes the queue
+│   └── clipdemo/     Tries the models on one image from the command line
+├── internal/
+│   ├── api/          HTTP handlers and middleware
+│   ├── crawler/      Directory walking, MIME and EXIF detection, hashing
+│   ├── embedding/    ONNX inference, tokenizers, image preprocessing
+│   ├── health/       The -check connectivity report
+│   ├── imaging/      Decoding, orientation, thumbnails
+│   ├── indexer/      The job pipeline
+│   ├── jobs/         The queue (owns its schema)
+│   ├── library/      Photos, tags and search (owns its schema)
+│   ├── settings/     Configuration from the environment and .env
+│   └── storage/      S3 client
+├── api/openapi.yaml  API contract
+├── scripts/          Model download
+├── web/              React app
+└── Dockerfile        Images for api, indexer and crawler
+docker/               Compose files and example settings
+```
+
+## Quick start
+
+This runs everything on one machine with Docker. Create `phalbum/.env` with `POSTGRES_USER`,
+`POSTGRES_PASSWORD` and `POSTGRES_DB`, then:
 
 ```sh
 cd phalbum
@@ -84,32 +347,153 @@ make up                         # build the images and start everything
 make crawl DIR=~/Pictures       # queue a folder; the indexer picks the jobs up
 ```
 
-The crawler saves absolute paths, and the indexer and api open those files later. So all three
-containers mount `PHOTOS_ROOT` (default: your home directory) read-only **at the same path**,
-and the crawler can start from any folder below it. Settings (environment, or a `docker/.env`
-file):
+Open http://localhost:8090. The first build downloads the models, which takes a while.
 
-| Variable          | Default   | Meaning                                                        |
-|-------------------|-----------|----------------------------------------------------------------|
-| `PHOTOS_ROOT`     | `$HOME`   | Folder tree the containers can read photos from                |
-| `PHOTOS_UID/GID`  | `1000`    | User the containers run as; must be able to read the photos    |
+The folder must be under `PHOTOS_ROOT`, which defaults to your home directory. The local compose file
+reads these from the environment or a `docker/.env` file:
+
+| Variable          | Default   | Meaning                                                           |
+|-------------------|-----------|-------------------------------------------------------------------|
+| `PHOTOS_ROOT`     | `$HOME`   | Folder tree the containers can read photos from                   |
+| `PHOTOS_UID/GID`  | `1000`    | User the containers run as; must be able to read the photos       |
 | `STORE_ORIGINALS` | `false`   | Copy originals into SeaweedFS, so they're served without the disk |
 
-## Seaweedfs
-This is the storage layer of the system. The goal of SeaweedFS is to make O(1) disk access. This
-is done by the separation of the data and metadata paths.
+## Raspberry Pi + PC
 
-It has three components:
+This layout is for a Raspberry Pi 3 (1 GB of RAM). See [Deployment layouts](#deployment-layouts) for
+what runs where.
 
-1. The master: contains file metadata (Volume-to-server mappings). The idea is that the thing is small enough to be cacheable and quick
-1. The volume servers (one or more): Store the actual blob data and per-blob metadata
-1. Filer: this is a service for exposing POSIX like filesystem abstraction. This is optional.
+The Pi publishes ports `8090` (web), `5432` (Postgres) and `8333` (S3). While the PC is off, search
+keeps working and new jobs wait in the queue. Keep all of this on a trusted LAN, and don't forward
+these ports to the internet.
 
-More information at (DeepWiki - SeaweedFS overview)[https://deepwiki.com/seaweedfs/seaweedfs/1.1-architecture-overview]
+### Prepare the machines
 
+- **64-bit OS on the Pi:** `uname -m` must print `aarch64`.
+- **SSD on the Pi:** format it as ext4 (Postgres needs Unix permissions, so not exFAT or NTFS) and
+  mount it from `/etc/fstab`. It must hold the whole photo library, because originals are copied to
+  it. It may need a powered USB hub or a low-power enclosure, and it's worth moving Docker's data
+  (`data-root`) to it and adding a swap file there as a safety margin.
+- **NAS on both machines:** mount it from `/etc/fstab` **at the same path**, because of the
+  [same-path rule](#deployment-layouts). It must be mounted before Docker starts, or a container can
+  bind an empty directory.
+- **Pi address:** give it a static IP or DHCP reservation.
 
+### Deploy
 
+On the PC, build the arm64 images and copy them over. The web app and Go binaries are cross-compiled
+natively; the rest of the image build uses QEMU emulation.
 
-Reporting anonymous cluster statistics to https://telemetry.seaweedfs.com/api/collect every 24h0m0s once 10 GiB are stored, use -telemetry=false to opt out
-Data is in /data
+```sh
+cd phalbum
+make rpi-setup                  # arm64 emulation; repeat after a reboot
+make rpi-images
+make rpi-deploy RPI=user@pi     # copies to ~/phalbum on the Pi by default (RPI_DIR)
+```
 
+On the Pi, in that directory, copy the two examples and fill them in, using the same keys in both:
+
+```sh
+cp rpi.env.example rpi.env
+cp s3.example.json s3.json
+docker compose --env-file rpi.env -f docker-compose.rpi.yml up -d
+```
+
+On the PC, copy `docker/indexer.env.example` to `docker/indexer.env`, fill it in with the same
+credentials, and start the indexer:
+
+```sh
+cd phalbum
+make indexer-up
+```
+
+Then queue a folder from the Pi:
+
+```sh
+docker compose --env-file rpi.env -f docker-compose.rpi.yml run --rm crawler /mnt/photos/some-folder
+```
+
+### Check the connections
+
+Each binary has a `-check` flag that tests its own links, from where it runs, and exits non-zero if
+any fail. It only reads, so it's safe to run at any time.
+
+```sh
+# On the PC, in phalbum/: Postgres and S3 on the Pi, the NAS mount, the model files
+make indexer-check
+
+# On the Pi, once the stack is up
+docker compose --env-file rpi.env -f docker-compose.rpi.yml run --rm --no-deps api -check
+docker compose --env-file rpi.env -f docker-compose.rpi.yml run --rm --no-deps crawler -check
+```
+
+### What to expect on a Pi 3
+
+The SSD and the network share one USB 2.0 bus, so the first crawl and copying originals will be slow.
+Searches also take longer than on a PC.
+
+If the api runs out of memory, set `CLIP_DISABLE_VISION=true` in `rpi.env`. That only disables
+searching by an uploaded picture. Text search and "more like this" keep working.
+
+If jobs fail, for example because the Pi was unreachable or restarting, queue them again from the PC:
+
+```sh
+cd docker
+docker compose --env-file indexer.env -f docker-compose.indexer.yml run --rm indexer -retry-failed -once
+```
+
+## Configuration
+
+All programs read the environment, optionally seeded from a `.env` file in the current or parent
+directory. Values already in the environment win.
+
+| Variable | Default | Used by | Meaning |
+|---|---|---|---|
+| `DATABASE_URL` | | all | Full connection string; overrides `POSTGRES_*` |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD` | | all | Database credentials |
+| `POSTGRES_DB` | `postgres` | all | Database name |
+| `POSTGRES_HOST`, `POSTGRES_PORT` | `localhost`, `5432` | all | Database address |
+| `S3_ENDPOINT` | `http://localhost:8333` | api, indexer | SeaweedFS S3 address |
+| `S3_REGION`, `S3_BUCKET` | `us-east-1`, `photos` | api, indexer | The bucket is created if missing |
+| `S3_ACCESS_KEY`, `S3_SECRET_KEY` | | api, indexer | Empty means anonymous access |
+| `STORE_ORIGINALS` | `false` | indexer | Also copy originals to S3 |
+| `PHOTOS_ROOT` | | `-check` | Photos folder to verify |
+| `ONNX_LIB` | `models/libonnxruntime.so.1.31.0` | api, indexer | ONNX Runtime library |
+| `CLIP_MODELS_DIR` | `models/clip-vit-base-patch32` | api, indexer | CLIP model files |
+| `CLIP_TEXT_MODELS_DIR` | | api | Multilingual text model; empty uses CLIP's English one. The Docker images set it |
+| `ONNX_THREADS` | `0` (automatic) | api | ONNX Runtime threads |
+| `CLIP_DISABLE_VISION` | `false` | api | Don't load the image encoder, saving memory; disables searching by a picture |
+| `API_ADDR` | `:8090` | api | Listen address |
+| `CORS_ORIGINS` | `*` | api | Allowed origins, comma-separated |
+
+## Development
+
+Requires Go 1.25, and Node 20.19+ (see `phalbum/web/.nvmrc`) for the web app.
+
+```sh
+cd phalbum
+scripts/fetch-models.sh   # download ONNX Runtime and the models into models/
+make api                  # npm ci, build the web app, then go build -o bin/api ./cmd/api
+make dev-web              # Vite on http://localhost:5173 with hot reload; proxies /api to :8090
+make gen-api              # regenerate web/src/api/schema.d.ts after changing api/openapi.yaml
+make test                 # Go tests and the web typecheck
+```
+
+Without a web build, the API still works, and `/` answers 503 with a hint to build the app. Tests that
+need the model files or a real service skip themselves when those aren't available.
+
+## SeaweedFS
+
+This is the storage layer. MinIO would be the usual choice, but that project was archived in May 2026.
+[SeaweedFS](https://github.com/seaweedfs/seaweedfs) is open source, written in Go, and follows the same
+ideas as Facebook's Haystack: it separates the data and metadata paths to make disk access O(1).
+
+It has these components:
+
+1. **Master:** holds the volume-to-server mappings, small enough to be cacheable and quick.
+1. **Volume servers (one or more):** store the blob data and per-blob metadata.
+1. **Filer (optional):** exposes a POSIX-like filesystem abstraction.
+1. **S3 gateway:** the S3 API this project talks to, on top of the filer.
+
+More information at
+[DeepWiki - SeaweedFS overview](https://deepwiki.com/seaweedfs/seaweedfs/1.1-architecture-overview).

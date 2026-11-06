@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/crawler"
+	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/health"
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/jobs"
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/settings"
 )
@@ -26,7 +27,19 @@ func main() {
 
 	dsn := flag.String("db", "", "Postgres connection string (default: from settings, i.e. $DATABASE_URL or $POSTGRES_*)")
 	dryRun := flag.Bool("dry-run", false, "only list the images found, don't touch the database")
+	check := flag.Bool("check", false, "check the connections to the database and photos, then exit")
 	flag.Parse()
+	if *check {
+		if *dsn == "" {
+			*dsn = cfg.DSN()
+		}
+		err := health.Run(context.Background(), os.Stdout, health.Database(*dsn), health.Photos(cfg.PhotosRoot))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	root := "."
 	if flag.NArg() > 0 {
 		root = flag.Arg(0)

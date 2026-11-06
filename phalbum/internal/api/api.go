@@ -52,6 +52,9 @@ type Server struct {
 	Ping        func(context.Context) error // health check; nil means always healthy
 	CORSOrigins []string                    // allowed origins; "*" allows any
 	Log         *log.Logger                 // request and error log; nil uses the default logger
+	// NoImageSearch makes searching by an uploaded picture answer 503, for
+	// servers running without the vision model.
+	NoImageSearch bool
 
 	embedMu sync.Mutex // CLIP calls are serialized
 }

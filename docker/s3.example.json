@@ -1,0 +1,11 @@
+{
+  "identities": [
+    {
+      "name": "phalbum",
+      "credentials": [
+        { "accessKey": "change-me", "secretKey": "change-me" }
+      ],
+      "actions": ["Admin", "Read", "List", "Tagging", "Write"]
+    }
+  ]
+}

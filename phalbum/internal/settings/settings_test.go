@@ -61,3 +61,20 @@ func TestLoadWithoutEnvFile(t *testing.T) {
 		t.Error("invalid STORE_ORIGINALS should fail")
 	}
 }
+
+func TestLoadLowMemorySettings(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("CLIP_DISABLE_VISION", "true")
+	t.Setenv("ONNX_THREADS", "2")
+	s, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.DisableVision || s.OnnxThreads != 2 {
+		t.Errorf("DisableVision = %v, OnnxThreads = %d", s.DisableVision, s.OnnxThreads)
+	}
+	t.Setenv("ONNX_THREADS", "many")
+	if _, err := Load(); err == nil {
+		t.Error("invalid ONNX_THREADS accepted")
+	}
+}

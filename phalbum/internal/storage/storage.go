@@ -56,6 +56,28 @@ type S3 struct {
 
 // NewS3 creates the client and the bucket if it doesn't exist yet.
 func NewS3(ctx context.Context, cfg S3Config) (*S3, error) {
+	s := &S3{client: newClient(cfg), bucket: cfg.Bucket}
+	if err := s.ensureBucket(ctx); err != nil {
+		return nil, fmt.Errorf("bucket %s at %s: %w", cfg.Bucket, cfg.Endpoint, err)
+	}
+	return s, nil
+}
+
+// Ping checks that the endpoint is reachable and accepts the credentials,
+// without creating anything, and reports whether the bucket exists.
+func Ping(ctx context.Context, cfg S3Config) (bucketExists bool, err error) {
+	_, err = newClient(cfg).HeadBucket(ctx, &s3.HeadBucketInput{Bucket: &cfg.Bucket})
+	var notFound *types.NotFound
+	if errors.As(err, &notFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("bucket %s at %s: %w", cfg.Bucket, cfg.Endpoint, err)
+	}
+	return true, nil
+}
+
+func newClient(cfg S3Config) *s3.Client {
 	opts := s3.Options{
 		Region:       cfg.Region,
 		BaseEndpoint: aws.String(cfg.Endpoint),
@@ -70,11 +92,7 @@ func NewS3(ctx context.Context, cfg S3Config) (*S3, error) {
 	} else {
 		opts.Credentials = aws.AnonymousCredentials{}
 	}
-	s := &S3{client: s3.New(opts), bucket: cfg.Bucket}
-	if err := s.ensureBucket(ctx); err != nil {
-		return nil, fmt.Errorf("bucket %s at %s: %w", cfg.Bucket, cfg.Endpoint, err)
-	}
-	return s, nil
+	return s3.New(opts)
 }
 
 func (s *S3) ensureBucket(ctx context.Context) error {

@@ -45,6 +45,14 @@ type Settings struct {
 	// TextModelsDir, when set, makes the API embed search text with the
 	// multilingual encoder in this directory instead of CLIP's English one.
 	TextModelsDir string
+	// OnnxThreads limits the API's ONNX Runtime threads; 0 lets ORT decide.
+	OnnxThreads int
+	// DisableVision keeps the API from loading the vision model, to save memory
+	// on small machines. Searching by an uploaded picture is then unavailable.
+	DisableVision bool
+
+	// PhotosRoot is the folder tree holding the photos. Only used by -check.
+	PhotosRoot string
 
 	// Search API.
 	APIAddr     string
@@ -62,6 +70,14 @@ func Load() (*Settings, error) {
 	if err != nil {
 		return nil, fmt.Errorf("STORE_ORIGINALS: %w", err)
 	}
+	disableVision, err := strconv.ParseBool(getenv("CLIP_DISABLE_VISION", "false"))
+	if err != nil {
+		return nil, fmt.Errorf("CLIP_DISABLE_VISION: %w", err)
+	}
+	onnxThreads, err := strconv.Atoi(getenv("ONNX_THREADS", "0"))
+	if err != nil {
+		return nil, fmt.Errorf("ONNX_THREADS: %w", err)
+	}
 	return &Settings{
 		DatabaseURL:      os.Getenv("DATABASE_URL"),
 		PostgresUser:     os.Getenv("POSTGRES_USER"),
@@ -78,6 +94,9 @@ func Load() (*Settings, error) {
 		OnnxLib:          getenv("ONNX_LIB", "models/libonnxruntime.so.1.31.0"),
 		ModelsDir:        getenv("CLIP_MODELS_DIR", "models/clip-vit-base-patch32"),
 		TextModelsDir:    os.Getenv("CLIP_TEXT_MODELS_DIR"),
+		OnnxThreads:      onnxThreads,
+		DisableVision:    disableVision,
+		PhotosRoot:       os.Getenv("PHOTOS_ROOT"),
 		APIAddr:          getenv("API_ADDR", ":8090"),
 		CORSOrigins:      splitList(getenv("CORS_ORIGINS", "*")),
 	}, nil
