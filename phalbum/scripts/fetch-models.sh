@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Downloads the ONNX Runtime shared library and the CLIP ONNX models used by
-# internal/embedding into phalbum/models (git-ignored): OpenAI CLIP ViT-B/32 for
+# internal/embedding into MODELS_DIR (default: phalbum/models, git-ignored): OpenAI CLIP ViT-B/32 for
 # images and English text, and a multilingual text encoder distilled into the
 # same embedding space.
 set -euo pipefail
@@ -12,7 +12,7 @@ MCLIP_REPO="sentence-transformers/clip-ViT-B-32-multilingual-v1"
 MCLIP_BASE="https://huggingface.co/${MCLIP_REPO}/resolve/main"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DEST="${ROOT}/models"
+DEST="${MODELS_DIR:-${ROOT}/models}"
 mkdir -p "${DEST}/clip-vit-base-patch32" "${DEST}/clip-ViT-B-32-multilingual-v1"
 
 case "$(uname -m)" in
@@ -36,7 +36,8 @@ for f in onnx/vision_model_quantized.onnx onnx/text_model_quantized.onnx vocab.j
   out="${DEST}/clip-vit-base-patch32/$(basename "$f")"
   if [[ ! -f "${out}" ]]; then
     echo "Downloading ${f}"
-    curl -fL --progress-bar -o "${out}" "${HF_BASE}/${f}"
+    curl -fL --progress-bar -o "${out}.part" "${HF_BASE}/${f}"
+    mv "${out}.part" "${out}"
   fi
 done
 
@@ -46,7 +47,8 @@ fetch_mclip() {
   local out="${DEST}/clip-ViT-B-32-multilingual-v1/$2"
   if [[ ! -f "${out}" ]]; then
     echo "Downloading ${MCLIP_REPO} $1"
-    curl -fL --progress-bar -o "${out}" "${MCLIP_BASE}/$1"
+    curl -fL --progress-bar -o "${out}.part" "${MCLIP_BASE}/$1"
+    mv "${out}.part" "${out}"
   fi
 }
 fetch_mclip "onnx/${MCLIP_ONNX}" text_model_quantized.onnx

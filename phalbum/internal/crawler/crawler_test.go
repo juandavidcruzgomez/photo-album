@@ -45,7 +45,8 @@ func TestCrawl(t *testing.T) {
 	}
 
 	var last Progress
-	images, errs, err := Crawl(root, func(p Progress) { last = p })
+	var images []Image
+	errs, err := Crawl(root, 100, func(b []Image) { images = append(images, b...) }, func(p Progress) { last = p })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,8 +102,42 @@ func TestCrawl(t *testing.T) {
 	}
 }
 
+func TestCrawlBatches(t *testing.T) {
+	root := t.TempDir()
+	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
+	for _, name := range []string{"a.png", "b.png", "c.png", "d.png", "e.png"} {
+		writeFile(t, filepath.Join(root, name), func(f *os.File) error { return png.Encode(f, img) })
+	}
+
+	// Files are walked in name order, so each batch must arrive before the
+	// walk reaches the next file, and the last partial batch must not be lost.
+	var batches [][]string
+	var imagesWhenHandled []int
+	var p Progress
+	_, err := Crawl(root, 2, func(b []Image) {
+		var names []string
+		for _, im := range b {
+			names = append(names, filepath.Base(im.Path))
+		}
+		batches = append(batches, names)
+		imagesWhenHandled = append(imagesWhenHandled, p.Images)
+	}, func(np Progress) { p = np })
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{{"a.png", "b.png"}, {"c.png", "d.png"}, {"e.png"}}
+	if !reflect.DeepEqual(batches, want) {
+		t.Errorf("batches = %v, want %v", batches, want)
+	}
+	// Progress runs after each entry, so it has seen one image fewer than the
+	// batch that was just completed.
+	if !reflect.DeepEqual(imagesWhenHandled, []int{1, 3, 5}) {
+		t.Errorf("images seen when handling = %v", imagesWhenHandled)
+	}
+}
+
 func TestCrawlMissingRoot(t *testing.T) {
-	if _, _, err := Crawl(filepath.Join(t.TempDir(), "nope"), nil); err == nil {
+	if _, err := Crawl(filepath.Join(t.TempDir(), "nope"), 100, func([]Image) {}, nil); err == nil {
 		t.Error("expected error for missing root")
 	}
 }

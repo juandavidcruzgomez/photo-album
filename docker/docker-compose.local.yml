@@ -1,9 +1,11 @@
 
-# The app's images (api with the web UI, indexer, crawler) are built from
-# ../phalbum/Dockerfile. They read photos from PHOTOS_ROOT (default: your home
+# Everything on one machine, for development. The api with the web UI, indexer and
+# crawler share one image, built from ../phalbum/Dockerfile. They read photos from PHOTOS_ROOT (default: your home
 # directory), mounted read-only at the same path, because the crawler saves
 # absolute paths that the indexer and api open later.
 x-phalbum: &phalbum
+  build: ../phalbum
+  image: phalbum
   env_file:
     - ../phalbum/.env
   environment:
@@ -16,11 +18,14 @@ x-phalbum: &phalbum
   user: "${PHOTOS_UID:-1000}:${PHOTOS_GID:-1000}"
   volumes:
     - ${PHOTOS_ROOT:-${HOME}}:${PHOTOS_ROOT:-${HOME}}:ro
+    - models:/opt/phalbum/models:ro
   depends_on:
     db:
       condition: service_healthy
     seaweedfs-s3:
       condition: service_started
+    models:
+      condition: service_completed_successfully
 
 services:
 
@@ -111,34 +116,39 @@ services:
       timeout: 3s
       retries: 10
 
+  # Downloads the models into the volume if they're missing, then exits.
+  models:
+    build: ../phalbum
+    image: phalbum
+    entrypoint: ["fetch-models"]
+    user: root
+    volumes:
+      - models:/opt/phalbum/models
+
   # Search API and web UI on http://localhost:8090
   api:
     <<: *phalbum
-    build:
-      context: ../phalbum
-      target: api
-    image: phalbum-api
+    entrypoint: ["api"]
     ports:
       - 8090:8090
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "api", "-healthcheck"]
+      interval: 30s
+      timeout: 3s
+      start_period: 20s
 
   # Waits for jobs queued by the crawler and indexes them.
   indexer:
     <<: *phalbum
-    build:
-      context: ../phalbum
-      target: indexer
-    image: phalbum-indexer
+    entrypoint: ["indexer"]
     restart: unless-stopped
 
   # On demand, not started by `up`:
   #   docker compose -f docker/docker-compose.local.yml run --rm crawler /path/under/PHOTOS_ROOT
   crawler:
     <<: *phalbum
-    build:
-      context: ../phalbum
-      target: crawler
-    image: phalbum-crawler
+    entrypoint: ["crawler"]
     profiles: [tools]
 
   adminer:
@@ -149,6 +159,7 @@ services:
 
 
 volumes:
+  models:
   seaweedfs-master-volume:
     driver: local
     driver_opts:

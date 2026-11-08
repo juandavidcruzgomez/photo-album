@@ -1,5 +1,6 @@
 // Command crawler finds the images under a directory and queues an indexing
-// job for every image whose content hasn't been seen before.
+// job for every image whose content hasn't been seen before. Jobs are queued
+// in batches during the walk, so an interrupted crawl keeps what it queued.
 //
 //	go run ./cmd/crawler [-db postgres://...] [-dry-run] <root>
 package main
@@ -17,6 +18,9 @@ import (
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/jobs"
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/settings"
 )
+
+// batchSize is how many images the walk collects before queuing them.
+const batchSize = 100
 
 func main() {
 	cfg, err := settings.Load()
@@ -58,21 +62,32 @@ func main() {
 		defer store.Close()
 	}
 
+	var known map[string]jobs.FileState
+	if !*dryRun {
+		if known, err = store.KnownFiles(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, "loading known files:", err)
+			os.Exit(1)
+		}
+	}
+
 	status := newStatus(root)
-	images, errs, err := crawler.Crawl(root, status.update)
+	var queueErrs []error
+	handle := func(images []crawler.Image) {
+		if *dryRun {
+			for _, img := range images {
+				fmt.Printf("%s\t%d\t%s\t%v\texif=%d\n", img.Path, img.Size, img.MimeType, img.Tags, len(img.Exif))
+			}
+			return
+		}
+		queueErrs = append(queueErrs, enqueue(ctx, store, known, images, status)...)
+	}
+	errs, err := crawler.Crawl(root, batchSize, handle, status.update)
 	status.done()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-
-	if *dryRun {
-		for _, img := range images {
-			fmt.Printf("%s\t%d\t%s\t%v\texif=%d\n", img.Path, img.Size, img.MimeType, img.Tags, len(img.Exif))
-		}
-	} else {
-		errs = append(errs, enqueue(ctx, store, images, status)...)
-	}
+	errs = append(errs, queueErrs...)
 
 	for _, e := range errs {
 		fmt.Fprintln(os.Stderr, "error:", e)
@@ -80,20 +95,13 @@ func main() {
 	status.summary(len(errs))
 }
 
-// enqueue queues a job for every image not already known. Files whose path,
-// size and mtime match a previous crawl are skipped without hashing.
-func enqueue(ctx context.Context, store *jobs.Store, images []crawler.Image, status *status) []error {
-	known, err := store.KnownFiles(ctx)
-	if err != nil {
-		return []error{fmt.Errorf("loading known files: %w", err)}
-	}
-
+// enqueue queues a job for every image in a batch not already known. Files
+// whose path, size and mtime match a previous crawl are skipped without hashing.
+func enqueue(ctx context.Context, store *jobs.Store, known map[string]jobs.FileState, images []crawler.Image, status *status) []error {
 	var errs []error
 	q := &status.queue
-	q.total = len(images)
-	for i, img := range images {
-		q.done = i
-		status.updateQueue(len(errs))
+	for _, img := range images {
+		status.redraw()
 
 		if f, ok := known[img.Path]; ok && f.Unchanged(img.Size, img.ModTime) {
 			q.unchanged++
@@ -117,13 +125,12 @@ func enqueue(ctx context.Context, store *jobs.Store, images []crawler.Image, sta
 			q.duplicates++
 		}
 	}
-	q.done = len(images)
-	status.done()
+	q.errors += len(errs)
 	return errs
 }
 
-// status renders a single, self-overwriting progress line on stderr while
-// crawling and queuing. When stderr isn't a terminal it stays quiet until
+// status renders a single, self-overwriting progress line on stderr during the
+// crawl. When stderr isn't a terminal it stays quiet until
 // the summary.
 type status struct {
 	root  string
@@ -136,8 +143,7 @@ type status struct {
 }
 
 type queueProgress struct {
-	total, done                    int
-	created, duplicates, unchanged int
+	created, duplicates, unchanged, errors int
 }
 
 var spinner = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
@@ -167,24 +173,20 @@ func (s *status) tick() bool {
 
 func (s *status) update(p crawler.Progress) {
 	s.p = p
+	s.redraw()
+}
+
+func (s *status) redraw() {
 	if !s.tick() {
 		return
 	}
+	p, q := s.p, s.queue
 	dir, err := filepath.Rel(s.root, p.Dir)
 	if err != nil {
 		dir = p.Dir
 	}
-	fmt.Fprintf(os.Stderr, "\r\033[K%c %d dirs · %d files · %d images · %d errors  %s",
-		spinner[s.frame%len(spinner)], p.Dirs, p.Files, p.Images, p.Errors, shorten(dir, 50))
-}
-
-func (s *status) updateQueue(errors int) {
-	if !s.tick() {
-		return
-	}
-	q := s.queue
-	fmt.Fprintf(os.Stderr, "\r\033[K%c queuing %d/%d · %d new · %d dup · %d unchanged · %d errors",
-		spinner[s.frame%len(spinner)], q.done, q.total, q.created, q.duplicates, q.unchanged, errors)
+	fmt.Fprintf(os.Stderr, "\r\033[K%c %d dirs · %d images · %d new · %d dup · %d unchanged · %d errors  %s",
+		spinner[s.frame%len(spinner)], p.Dirs, p.Images, q.created, q.duplicates, q.unchanged, p.Errors+q.errors, shorten(dir, 40))
 }
 
 // done clears the progress line so regular output starts on a clean line.
@@ -197,7 +199,7 @@ func (s *status) done() {
 func (s *status) summary(errors int) {
 	fmt.Fprintf(os.Stderr, "✔ %d images in %d files across %d dirs, %d errors (%s)\n",
 		s.p.Images, s.p.Files, s.p.Dirs, errors, time.Since(s.start).Round(time.Millisecond))
-	if q := s.queue; q.total > 0 {
+	if q := s.queue; q.created+q.duplicates+q.unchanged > 0 {
 		fmt.Fprintf(os.Stderr, "  %d new jobs, %d duplicates, %d unchanged\n", q.created, q.duplicates, q.unchanged)
 	}
 }

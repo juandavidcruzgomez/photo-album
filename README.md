@@ -85,7 +85,9 @@ sequenceDiagram
    `webp`, `bmp`, `tiff`, `heic`, `avif`). A file whose path, size and modification time match the last
    crawl is skipped without being read, which makes repeat crawls fast. The folders between the crawl
    root and a file become its tags.
-2. **Queue.** Each new file is recorded in `crawled_files` and queued in `index_jobs`. Jobs are unique
+2. **Queue.** Every 100 images found, the walk pauses to hash and queue them, so jobs appear during the
+   crawl and an interrupted crawl keeps what it has queued. Each new file is recorded in `crawled_files`
+   and queued in `index_jobs`. Jobs are unique
    per SHA-256 content hash, so a photo copied to several folders is indexed once and remembers all its
    paths.
 3. **Claim.** The indexer takes the oldest queued job. A Postgres `NOTIFY` wakes it immediately, and it
@@ -247,7 +249,7 @@ Because the programs only meet in Postgres and S3, where each one runs is a depl
 
 | | Single machine | Raspberry Pi + PC |
 |---|---|---|
-| Compose files | [`docker-compose.local.yml`](docker/docker-compose.local.yml) | [`docker-compose.rpi.yml`](docker/docker-compose.rpi.yml) and [`docker-compose.indexer.yml`](docker/docker-compose.indexer.yml) |
+| Compose files | [`docker-compose.local.yml`](docker/docker-compose.local.yml) | [`docker/rpi`](docker/rpi/docker-compose.yml) and [`docker/pc`](docker/pc/docker-compose.yml) |
 | Postgres, SeaweedFS, api, crawler | This machine | Raspberry Pi |
 | Indexer | This machine | PC, reaching the Pi over the LAN |
 | Source photos | Local folders | NAS, mounted on both |
@@ -332,7 +334,7 @@ phalbum/
 ├── api/openapi.yaml  API contract
 ├── scripts/          Model download
 ├── web/              React app
-└── Dockerfile        Images for api, indexer and crawler
+└── Dockerfile        One image with api, indexer and crawler
 docker/               Compose files and example settings
 ```
 
@@ -342,12 +344,12 @@ This runs everything on one machine with Docker. Create `phalbum/.env` with `POS
 `POSTGRES_PASSWORD` and `POSTGRES_DB`, then:
 
 ```sh
-cd phalbum
-make up                         # build the images and start everything
-make crawl DIR=~/Pictures       # queue a folder; the indexer picks the jobs up
+cd docker
+docker compose -f docker-compose.local.yml up -d --build
+docker compose -f docker-compose.local.yml run --rm crawler $HOME/Pictures   # queue a folder
 ```
 
-Open http://localhost:8090. The first build downloads the models, which takes a while.
+Open http://localhost:8090. The first start downloads the models into a volume, which takes a while.
 
 The folder must be under `PHOTOS_ROOT`, which defaults to your home directory. The local compose file
 reads these from the environment or a `docker/.env` file:
@@ -372,46 +374,86 @@ these ports to the internet.
 - **64-bit OS on the Pi:** `uname -m` must print `aarch64`.
 - **SSD on the Pi:** format it as ext4 (Postgres needs Unix permissions, so not exFAT or NTFS) and
   mount it from `/etc/fstab`. It must hold the whole photo library, because originals are copied to
-  it. It may need a powered USB hub or a low-power enclosure, and it's worth moving Docker's data
-  (`data-root`) to it and adding a swap file there as a safety margin.
+  it. It may need a powered USB hub or a low-power enclosure, and it's worth adding a swap file
+  there as a safety margin.
+- **Docker's data on the SSD:** set `data-root` in `/etc/docker/daemon.json` to a folder on the SSD,
+  because Docker's volumes live there. Otherwise the database and copied photos fill the SD card.
 - **NAS on both machines:** mount it from `/etc/fstab` **at the same path**, because of the
   [same-path rule](#deployment-layouts). It must be mounted before Docker starts, or a container can
   bind an empty directory.
 - **Pi address:** give it a static IP or DHCP reservation.
 
-### Deploy
+### Build and push
 
-On the PC, build the arm64 images and copy them over. The web app and Go binaries are cross-compiled
-natively; the rest of the image build uses QEMU emulation.
+All three programs share one image, and each compose service chooses its binary with `entrypoint`. The
+models aren't in the image: at startup, a short-lived `models` service downloads any missing files into
+a volume. Nothing is built on the Pi.
+
+On the PC, in `phalbum/`, replacing `myuser` with your Docker Hub username:
+
+```sh
+# Lets this PC build for arm64. Needed once after each reboot.
+docker run --privileged --rm tonistiigi/binfmt --install arm64
+
+# Build
+docker build -t phalbum:amd64 .
+docker build --platform linux/arm64 -t phalbum:arm64 .
+
+# Tag
+docker tag phalbum:amd64 myuser/phalbum:amd64
+docker tag phalbum:arm64 myuser/phalbum:arm64
+
+# Push
+docker login
+docker push myuser/phalbum:amd64
+docker push myuser/phalbum:arm64
+```
+
+A repository Docker Hub creates on push is public by default. The image holds no credentials, because
+`.env` files are excluded from the build. If you make it private, run `docker login` on the Pi too.
+
+### Start the services
+
+Each machine has one folder with a `docker-compose.yml` and a `.env.example`. Compose reads `.env` from
+the same folder. `.env` sets the image, where the database and storage are, and the credentials, which
+must match on both machines.
+
+On the Pi, after copying the folder with `scp -r docker/rpi user@pi:phalbum`:
 
 ```sh
 cd phalbum
-make rpi-setup                  # arm64 emulation; repeat after a reboot
-make rpi-images
-make rpi-deploy RPI=user@pi     # copies to ~/phalbum on the Pi by default (RPI_DIR)
+cp .env.example .env            # then edit it
+docker compose pull
+docker compose up -d
 ```
 
-On the Pi, in that directory, copy the two examples and fill them in, using the same keys in both:
+On the PC:
 
 ```sh
-cp rpi.env.example rpi.env
-cp s3.example.json s3.json
-docker compose --env-file rpi.env -f docker-compose.rpi.yml up -d
-```
-
-On the PC, copy `docker/indexer.env.example` to `docker/indexer.env`, fill it in with the same
-credentials, and start the indexer:
-
-```sh
-cd phalbum
-make indexer-up
+cd docker/pc
+cp .env.example .env            # then edit it
+docker compose pull
+docker compose up -d
 ```
 
 Then queue a folder from the Pi:
 
 ```sh
-docker compose --env-file rpi.env -f docker-compose.rpi.yml run --rm crawler /mnt/photos/some-folder
+docker compose run --rm crawler /mnt/photos/some-folder
 ```
+
+To release a new version, build, tag and push again, then repeat `docker compose pull` and
+`docker compose up -d` on both machines.
+
+### Data
+
+Everything is kept in Docker volumes, which survive `docker compose down` and new image versions:
+
+| Volume | Machine | Holds |
+|---|---|---|
+| `db-data` | Pi | The Postgres database |
+| `seaweedfs-data` | Pi | Thumbnails and copied photos |
+| `models` | Pi and PC | ONNX Runtime and the models for that machine's architecture |
 
 ### Check the connections
 
@@ -419,12 +461,12 @@ Each binary has a `-check` flag that tests its own links, from where it runs, an
 any fail. It only reads, so it's safe to run at any time.
 
 ```sh
-# On the PC, in phalbum/: Postgres and S3 on the Pi, the NAS mount, the model files
-make indexer-check
+# On the PC, in docker/pc: Postgres and S3 on the Pi, the NAS mount, the model files
+docker compose run --rm indexer -check
 
 # On the Pi, once the stack is up
-docker compose --env-file rpi.env -f docker-compose.rpi.yml run --rm --no-deps api -check
-docker compose --env-file rpi.env -f docker-compose.rpi.yml run --rm --no-deps crawler -check
+docker compose run --rm --no-deps api -check
+docker compose run --rm --no-deps crawler -check
 ```
 
 ### What to expect on a Pi 3
@@ -432,14 +474,14 @@ docker compose --env-file rpi.env -f docker-compose.rpi.yml run --rm --no-deps c
 The SSD and the network share one USB 2.0 bus, so the first crawl and copying originals will be slow.
 Searches also take longer than on a PC.
 
-If the api runs out of memory, set `CLIP_DISABLE_VISION=true` in `rpi.env`. That only disables
+If the api runs out of memory, set `CLIP_DISABLE_VISION=true` in `.env`. That only disables
 searching by an uploaded picture. Text search and "more like this" keep working.
 
 If jobs fail, for example because the Pi was unreachable or restarting, queue them again from the PC:
 
 ```sh
-cd docker
-docker compose --env-file indexer.env -f docker-compose.indexer.yml run --rm indexer -retry-failed -once
+cd docker/pc
+docker compose run --rm indexer -retry-failed -once
 ```
 
 ## Configuration
@@ -460,7 +502,7 @@ directory. Values already in the environment win.
 | `PHOTOS_ROOT` | | `-check` | Photos folder to verify |
 | `ONNX_LIB` | `models/libonnxruntime.so.1.31.0` | api, indexer | ONNX Runtime library |
 | `CLIP_MODELS_DIR` | `models/clip-vit-base-patch32` | api, indexer | CLIP model files |
-| `CLIP_TEXT_MODELS_DIR` | | api | Multilingual text model; empty uses CLIP's English one. The Docker images set it |
+| `CLIP_TEXT_MODELS_DIR` | | api | Multilingual text model; empty uses CLIP's English one. The Docker image sets it |
 | `ONNX_THREADS` | `0` (automatic) | api | ONNX Runtime threads |
 | `CLIP_DISABLE_VISION` | `false` | api | Don't load the image encoder, saving memory; disables searching by a picture |
 | `API_ADDR` | `:8090` | api | Listen address |

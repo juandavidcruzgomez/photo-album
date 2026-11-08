@@ -1,0 +1,45 @@
+# This PC: only the indexer, using the database and storage on the Raspberry Pi.
+# While it's off, jobs wait in Postgres.
+# Copy .env.example to .env and fill it in, then:
+#   docker compose pull
+#   docker compose up -d
+
+name: phalbum-pc
+
+services:
+
+  # Downloads the models into the volume if they're missing, then exits.
+  models:
+    image: ${IMAGE:?}
+    entrypoint: ["fetch-models"]
+    user: root
+    volumes:
+      - models:/opt/phalbum/models
+
+  # Exits if the Pi can't be reached at startup; the restart policy retries.
+  indexer:
+    image: ${IMAGE:?}
+    entrypoint: ["indexer"]
+    restart: unless-stopped
+    environment:
+      PHOTOS_ROOT: ${PHOTOS_ROOT:?}
+      POSTGRES_HOST: ${POSTGRES_HOST:?}
+      POSTGRES_PORT: ${POSTGRES_PORT:?}
+      POSTGRES_USER: ${POSTGRES_USER:?}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: ${POSTGRES_DB:?}
+      S3_ENDPOINT: ${S3_ENDPOINT:?}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?}
+      STORE_ORIGINALS: ${STORE_ORIGINALS:-true}
+    # The owner of the photos, so private directories (mode 700) are readable.
+    user: "${PHOTOS_UID:-1000}:${PHOTOS_GID:-1000}"
+    volumes:
+      - ${PHOTOS_ROOT:?}:${PHOTOS_ROOT:?}:ro
+      - models:/opt/phalbum/models:ro
+    depends_on:
+      models:
+        condition: service_completed_successfully
+
+volumes:
+  models:

@@ -1,23 +1,22 @@
-# The Raspberry Pi side of the split deployment: database, storage, api with the
-# web UI, and crawler. The indexer runs on another machine, using
-# docker-compose.indexer.yml, and reaches Postgres and S3 over the LAN. See
-# "Raspberry Pi + PC" in the README.
-#
-# Tuned for 1 GB of RAM. The images are built on the PC and loaded here by
-# `make rpi-deploy`:
-#   docker compose --env-file rpi.env -f docker-compose.rpi.yml up -d
+# Raspberry Pi: database, storage, api with the web UI, and crawler.
+# Copy .env.example to .env and fill it in, then:
+#   docker compose pull
+#   docker compose up -d
+# Queue a folder for indexing:
+#   docker compose run --rm crawler /path/under/PHOTOS_ROOT
 
 name: phalbum-rpi
 
 x-phalbum: &phalbum
+  image: ${IMAGE:?}
   environment:
     PHOTOS_ROOT: ${PHOTOS_ROOT:?}
+    POSTGRES_HOST: ${POSTGRES_HOST:?}
+    POSTGRES_PORT: ${POSTGRES_PORT:?}
     POSTGRES_USER: ${POSTGRES_USER:?}
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
-    POSTGRES_DB: ${POSTGRES_DB:-postgres}
-    POSTGRES_HOST: db
-    POSTGRES_PORT: "5432"
-    S3_ENDPOINT: http://seaweedfs:8333
+    POSTGRES_DB: ${POSTGRES_DB:?}
+    S3_ENDPOINT: ${S3_ENDPOINT:?}
     S3_ACCESS_KEY: ${S3_ACCESS_KEY:?}
     S3_SECRET_KEY: ${S3_SECRET_KEY:?}
     ONNX_THREADS: ${ONNX_THREADS:-2}
@@ -26,15 +25,18 @@ x-phalbum: &phalbum
   user: "${PHOTOS_UID:-1000}:${PHOTOS_GID:-1000}"
   volumes:
     - ${PHOTOS_ROOT:?}:${PHOTOS_ROOT:?}:ro
+    - models:/opt/phalbum/models:ro
   depends_on:
     db:
       condition: service_healthy
     seaweedfs:
       condition: service_started
+    models:
+      condition: service_completed_successfully
 
 services:
 
-  # Postgres, reachable by the indexer on the LAN.
+  # Postgres, reachable by the indexer on the LAN. Tuned for 1 GB of RAM.
   db:
     image: pgvector/pgvector:pg14
     restart: unless-stopped
@@ -55,9 +57,9 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
-      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:?}
     volumes:
-      - ${DATA_DIR:?}/db:/var/lib/postgresql/data
+      - db-data:/var/lib/postgresql/data
     ports:
       - 5432:5432
     healthcheck:
@@ -66,43 +68,58 @@ services:
       timeout: 5s
       retries: 10
 
-  # Master, volume, filer and S3 in one process, to save memory. Only S3 is
-  # published; it requires the keys in s3.json.
+  # Stores thumbnails and copied photos. Master, volume, filer and S3 run in one
+  # process to save memory, and only S3 is published.
   seaweedfs:
     image: chrislusf/seaweedfs:latest
     restart: unless-stopped
     mem_limit: 256m
-    # Bounded upload buffers and caches: large originals otherwise exceed mem_limit.
     environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:?}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:?}
+      # With the bounded buffers below: large originals otherwise exceed mem_limit.
       GOMEMLIMIT: 200MiB
       GOGC: "50"
     command: >-
       server -dir=/data -ip=seaweedfs -ip.bind=0.0.0.0
       -master.volumeSizeLimitMB=1024 -volume.max=0 -volume.index=leveldb
       -volume.concurrentUploadLimitMB=64 -filer -filer.concurrentUploadLimitMB=64
-      -s3 -s3.config=/etc/seaweedfs/s3.json -s3.concurrentUploadLimitMB=64
-      -s3.cacheCapacityMB=16 -s3.readerCacheSizeMB=32
+      -s3 -s3.concurrentUploadLimitMB=64 -s3.cacheCapacityMB=16 -s3.readerCacheSizeMB=32
     volumes:
-      - ${DATA_DIR:?}/seaweedfs:/data
-      - ./s3.json:/etc/seaweedfs/s3.json:ro
+      - seaweedfs-data:/data
     ports:
       - 8333:8333
+
+  # Downloads the models into the volume if they're missing, then exits.
+  models:
+    image: ${IMAGE:?}
+    entrypoint: ["fetch-models"]
+    user: root
+    volumes:
+      - models:/opt/phalbum/models
 
   # Search API and web UI on http://<this machine>:8090
   api:
     <<: *phalbum
-    image: phalbum-api:arm64
-    pull_policy: never
+    entrypoint: ["api"]
     restart: unless-stopped
     mem_limit: 600m
     ports:
       - 8090:8090
+    healthcheck:
+      test: ["CMD", "api", "-healthcheck"]
+      interval: 30s
+      timeout: 3s
+      start_period: 20s
 
-  # On demand, not started by `up`:
-  #   docker compose --env-file rpi.env -f docker-compose.rpi.yml run --rm crawler /path/under/PHOTOS_ROOT
+  # On demand, not started by `up`.
   crawler:
     <<: *phalbum
-    image: phalbum-crawler:arm64
-    pull_policy: never
+    entrypoint: ["crawler"]
     mem_limit: 256m
     profiles: [tools]
+
+volumes:
+  db-data:
+  seaweedfs-data:
+  models:

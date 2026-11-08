@@ -58,33 +58,35 @@ type Progress struct {
 	Errors int    // errors collected so far
 }
 
-// Crawl walks root recursively and returns every image found. Per-file
-// errors are collected in the returned slice and never abort the walk;
-// only an unusable root gives a non-nil error.
+// Crawl walks root recursively and passes the images it finds to handle in
+// batches of up to batchSize, as it goes. The walk waits while handle runs, and
+// images are only held until their batch is handled. Per-file errors are
+// collected in the returned slice and never abort the walk; only an unusable
+// root gives a non-nil error.
 //
 // If progress is non-nil it is called after every entry visited, so it
 // should be cheap; callers that render output should throttle it.
-func Crawl(root string, progress func(Progress)) ([]Image, []error, error) {
+func Crawl(root string, batchSize int, handle func([]Image), progress func(Progress)) ([]error, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	info, err := os.Stat(absRoot)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if !info.IsDir() {
-		return nil, nil, fmt.Errorf("%s: not a directory", absRoot)
+		return nil, fmt.Errorf("%s: not a directory", absRoot)
 	}
 
-	var images []Image
+	var batch []Image
 	var errs []error
 	var p Progress
 
 	walkErr := filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, err error) (ret error) {
 		if progress != nil {
 			defer func() {
-				p.Images, p.Errors = len(images), len(errs)
+				p.Errors = len(errs)
 				progress(p)
 			}()
 		}
@@ -124,13 +126,22 @@ func Crawl(root string, progress func(Progress)) ([]Image, []error, error) {
 			errs = append(errs, err)
 			return nil
 		}
-		images = append(images, img)
+		p.Images++
+		batch = append(batch, img)
+		if len(batch) >= batchSize {
+			full := batch
+			batch = nil
+			handle(full)
+		}
 		return nil
 	})
 	if walkErr != nil {
 		errs = append(errs, walkErr)
 	}
-	return images, errs, nil
+	if len(batch) > 0 {
+		handle(batch)
+	}
+	return errs, nil
 }
 
 // inspect opens path and builds its Image record.
