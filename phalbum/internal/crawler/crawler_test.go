@@ -46,7 +46,7 @@ func TestCrawl(t *testing.T) {
 
 	var last Progress
 	var images []Image
-	errs, err := Crawl(root, 100, func(b []Image) { images = append(images, b...) }, func(p Progress) { last = p })
+	errs, err := Crawl(root, Options{BatchSize: 100}, func(b []Image) { images = append(images, b...) }, func(p Progress) { last = p })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestCrawlBatches(t *testing.T) {
 	var batches [][]string
 	var imagesWhenHandled []int
 	var p Progress
-	_, err := Crawl(root, 2, func(b []Image) {
+	_, err := Crawl(root, Options{BatchSize: 2}, func(b []Image) {
 		var names []string
 		for _, im := range b {
 			names = append(names, filepath.Base(im.Path))
@@ -136,8 +136,45 @@ func TestCrawlBatches(t *testing.T) {
 	}
 }
 
+func TestCrawlSkipsIconsAndCaches(t *testing.T) {
+	root := t.TempDir()
+	png := func(w, h int) func(*os.File) error {
+		return func(f *os.File) error { return png.Encode(f, image.NewRGBA(image.Rect(0, 0, w, h))) }
+	}
+	jpg := func(w, h int) func(*os.File) error {
+		return func(f *os.File) error { return jpeg.Encode(f, image.NewRGBA(image.Rect(0, 0, w, h)), nil) }
+	}
+	writeFile(t, filepath.Join(root, "photo.jpg"), jpg(640, 480))
+	writeFile(t, filepath.Join(root, "panorama.png"), png(1200, 100)) // longest side counts
+	writeFile(t, filepath.Join(root, "icon.png"), png(64, 64))
+	writeFile(t, filepath.Join(root, "thumb.jpg"), jpg(320, 240))
+	writeFile(t, filepath.Join(root, "._photo.jpg"), jpg(640, 480))
+	writeFile(t, filepath.Join(root, ".thumbnails", "big.jpg"), jpg(640, 480))
+	writeFile(t, filepath.Join(root, "album", "@eaDir", "big.jpg"), jpg(640, 480))
+	writeFile(t, filepath.Join(root, "album", "kept.jpg"), jpg(400, 300)) // exactly the limit
+
+	var names []string
+	var last Progress
+	_, err := Crawl(root, Options{BatchSize: 100, MinSize: 400}, func(b []Image) {
+		for _, im := range b {
+			rel, _ := filepath.Rel(root, im.Path)
+			names = append(names, rel)
+		}
+	}, func(p Progress) { last = p })
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.Join("album", "kept.jpg"), "panorama.png", "photo.jpg"}
+	if !reflect.DeepEqual(names, want) {
+		t.Errorf("images = %v, want %v", names, want)
+	}
+	if last.Small != 2 {
+		t.Errorf("small = %d, want 2", last.Small)
+	}
+}
+
 func TestCrawlMissingRoot(t *testing.T) {
-	if _, err := Crawl(filepath.Join(t.TempDir(), "nope"), 100, func([]Image) {}, nil); err == nil {
+	if _, err := Crawl(filepath.Join(t.TempDir(), "nope"), Options{BatchSize: 100}, func([]Image) {}, nil); err == nil {
 		t.Error("expected error for missing root")
 	}
 }

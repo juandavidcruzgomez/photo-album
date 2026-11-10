@@ -2,10 +2,15 @@
 package crawler
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"io/fs"
 	"mime"
@@ -17,6 +22,9 @@ import (
 
 	"github.com/rwcarlsen/goexif/exif"
 	"github.com/rwcarlsen/goexif/tiff"
+	_ "golang.org/x/image/bmp"
+	_ "golang.org/x/image/tiff"
+	_ "golang.org/x/image/webp"
 )
 
 // Image describes an image file found by Crawl.
@@ -49,24 +57,46 @@ var fallbackMime = map[string]string{
 // errNotImage marks files whose content isn't an image despite the extension.
 var errNotImage = errors.New("not an image")
 
+// errTooSmall marks images smaller than Options.MinSize: icons and thumbnails.
+var errTooSmall = errors.New("too small")
+
+// skipDirs are folders that only hold caches, thumbnails or deleted files,
+// written by NAS systems, macOS and Windows. Hidden folders are skipped too.
+var skipDirs = map[string]bool{
+	"@eaDir": true, "@__thumb": true, "#recycle": true, "#snapshot": true,
+	"__MACOSX": true, "$RECYCLE.BIN": true, "System Volume Information": true,
+}
+
+// Options control a crawl.
+type Options struct {
+	// BatchSize is how many images are passed to the handler at a time.
+	BatchSize int
+	// MinSize skips images whose longest side is shorter, in pixels, such as
+	// icons and thumbnails. 0 keeps every size. Images whose size can't be read
+	// from their header, such as HEIC, are kept.
+	MinSize int
+}
+
 // Progress is a snapshot of a running crawl, passed to the Crawl callback.
 type Progress struct {
 	Dir    string // directory currently being scanned
 	Dirs   int    // directories entered so far
 	Files  int    // regular files seen so far
 	Images int    // images collected so far
+	Small  int    // images skipped as smaller than Options.MinSize
 	Errors int    // errors collected so far
 }
 
 // Crawl walks root recursively and passes the images it finds to handle in
-// batches of up to batchSize, as it goes. The walk waits while handle runs, and
+// batches of up to opts.BatchSize, as it goes. Hidden files and folders, and
+// the cache folders in skipDirs, are not visited. The walk waits while handle runs, and
 // images are only held until their batch is handled. Per-file errors are
 // collected in the returned slice and never abort the walk; only an unusable
 // root gives a non-nil error.
 //
 // If progress is non-nil it is called after every entry visited, so it
 // should be cheap; callers that render output should throttle it.
-func Crawl(root string, batchSize int, handle func([]Image), progress func(Progress)) ([]error, error) {
+func Crawl(root string, opts Options, handle func([]Image), progress func(Progress)) ([]error, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
@@ -104,6 +134,12 @@ func Crawl(root string, batchSize int, handle func([]Image), progress func(Progr
 			}
 			return nil
 		}
+		if path != absRoot && (strings.HasPrefix(d.Name(), ".") || (d.IsDir() && skipDirs[d.Name()])) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if d.IsDir() {
 			p.Dir = path
 			p.Dirs++
@@ -118,8 +154,12 @@ func Crawl(root string, batchSize int, handle func([]Image), progress func(Progr
 			return nil
 		}
 
-		img, err := inspect(absRoot, path, ext)
+		img, err := inspect(absRoot, path, ext, opts.MinSize)
 		if errors.Is(err, errNotImage) {
+			return nil
+		}
+		if errors.Is(err, errTooSmall) {
+			p.Small++
 			return nil
 		}
 		if err != nil {
@@ -128,7 +168,7 @@ func Crawl(root string, batchSize int, handle func([]Image), progress func(Progr
 		}
 		p.Images++
 		batch = append(batch, img)
-		if len(batch) >= batchSize {
+		if len(batch) >= opts.BatchSize {
 			full := batch
 			batch = nil
 			handle(full)
@@ -145,7 +185,7 @@ func Crawl(root string, batchSize int, handle func([]Image), progress func(Progr
 }
 
 // inspect opens path and builds its Image record.
-func inspect(root, path, ext string) (Image, error) {
+func inspect(root, path, ext string, minSize int) (Image, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return Image{}, err
@@ -165,6 +205,15 @@ func inspect(root, path, ext string) (Image, error) {
 	mimeType := detectMime(head[:n], ext)
 	if !strings.HasPrefix(mimeType, "image/") {
 		return Image{}, errNotImage
+	}
+	if minSize > 0 {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return Image{}, fmt.Errorf("%s: %w", path, err)
+		}
+		cfg, _, err := image.DecodeConfig(bufio.NewReader(f))
+		if err == nil && max(cfg.Width, cfg.Height) < minSize {
+			return Image{}, errTooSmall
+		}
 	}
 
 	img := Image{

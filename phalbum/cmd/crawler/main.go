@@ -2,7 +2,10 @@
 // job for every image whose content hasn't been seen before. Jobs are queued
 // in batches during the walk, so an interrupted crawl keeps what it queued.
 //
-//	go run ./cmd/crawler [-db postgres://...] [-dry-run] <root>
+// Images smaller than -min-size (icons, thumbnails) and hidden or cache folders
+// are skipped.
+//
+//	go run ./cmd/crawler [-db postgres://...] [-dry-run] [-min-size 400] <root>
 package main
 
 import (
@@ -32,6 +35,7 @@ func main() {
 	dsn := flag.String("db", "", "Postgres connection string (default: from settings, i.e. $DATABASE_URL or $POSTGRES_*)")
 	dryRun := flag.Bool("dry-run", false, "only list the images found, don't touch the database")
 	check := flag.Bool("check", false, "check the connections to the database and photos, then exit")
+	minSize := flag.Int("min-size", 400, "skip images whose longest side is shorter, in pixels, such as icons and thumbnails; 0 keeps all")
 	flag.Parse()
 	if *check {
 		if *dsn == "" {
@@ -81,7 +85,7 @@ func main() {
 		}
 		queueErrs = append(queueErrs, enqueue(ctx, store, known, images, status)...)
 	}
-	errs, err := crawler.Crawl(root, batchSize, handle, status.update)
+	errs, err := crawler.Crawl(root, crawler.Options{BatchSize: batchSize, MinSize: *minSize}, handle, status.update)
 	status.done()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -185,8 +189,8 @@ func (s *status) redraw() {
 	if err != nil {
 		dir = p.Dir
 	}
-	fmt.Fprintf(os.Stderr, "\r\033[K%c %d dirs · %d images · %d new · %d dup · %d unchanged · %d errors  %s",
-		spinner[s.frame%len(spinner)], p.Dirs, p.Images, q.created, q.duplicates, q.unchanged, p.Errors+q.errors, shorten(dir, 40))
+	fmt.Fprintf(os.Stderr, "\r\033[K%c %d dirs · %d images · %d small · %d new · %d dup · %d unchanged · %d errors  %s",
+		spinner[s.frame%len(spinner)], p.Dirs, p.Images, p.Small, q.created, q.duplicates, q.unchanged, p.Errors+q.errors, shorten(dir, 40))
 }
 
 // done clears the progress line so regular output starts on a clean line.
@@ -197,8 +201,8 @@ func (s *status) done() {
 }
 
 func (s *status) summary(errors int) {
-	fmt.Fprintf(os.Stderr, "✔ %d images in %d files across %d dirs, %d errors (%s)\n",
-		s.p.Images, s.p.Files, s.p.Dirs, errors, time.Since(s.start).Round(time.Millisecond))
+	fmt.Fprintf(os.Stderr, "✔ %d images in %d files across %d dirs, %d small images skipped, %d errors (%s)\n",
+		s.p.Images, s.p.Files, s.p.Dirs, s.p.Small, errors, time.Since(s.start).Round(time.Millisecond))
 	if q := s.queue; q.created+q.duplicates+q.unchanged > 0 {
 		fmt.Fprintf(os.Stderr, "  %d new jobs, %d duplicates, %d unchanged\n", q.created, q.duplicates, q.unchanged)
 	}

@@ -83,7 +83,9 @@ sequenceDiagram
 
 1. **Crawl.** The crawler walks the tree, keeping files with an image extension (`jpg`, `png`, `gif`,
    `webp`, `bmp`, `tiff`, `heic`, `avif`). A file whose path, size and modification time match the last
-   crawl is skipped without being read, which makes repeat crawls fast. The folders between the crawl
+   crawl is skipped without being read, which makes repeat crawls fast. Icons and thumbnails, meaning
+   images whose longest side is under 400 px (`-min-size`), are skipped, and so are hidden folders and
+   files and the caches NAS systems and macOS create, such as `@eaDir` and `__MACOSX`. The folders between the crawl
    root and a file become its tags.
 2. **Queue.** Every 100 images found, the walk pauses to hash and queue them, so jobs appear during the
    crawl and an interrupted crawl keeps what it has queued. Each new file is recorded in `crawled_files`
