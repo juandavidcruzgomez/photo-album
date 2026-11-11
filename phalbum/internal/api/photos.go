@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"image"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/imaging"
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/library"
+	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/storage"
 )
 
 const (
@@ -272,19 +274,44 @@ func (s *Server) getPhoto(w http.ResponseWriter, r *http.Request) {
 	}{d, p.ThumbnailURL, p.OriginalURL})
 }
 
-// thumbnail streams the JPEG thumbnail from object storage. Keys are
-// content-addressed, so it can be cached forever.
+// thumbnail serves the JPEG thumbnail from object storage. Keys are
+// content-addressed, so it can be cached forever. When storage can't
+// return it (missing, corrupted, too slow), it is rebuilt from the source
+// file and stored again.
 func (s *Server) thumbnail(w http.ResponseWriter, r *http.Request) {
 	files, err := s.Library.Files(r.Context(), r.PathValue("id"))
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	s.stream(w, r, files.ThumbnailKey, "image/jpeg")
+	data, contentType, err := s.readThumbnail(r.Context(), files.ThumbnailKey)
+	if err != nil {
+		if r.Context().Err() != nil {
+			return // the browser gave up on it
+		}
+		s.logger().Printf("thumbnail %s: %v; rebuilding from source", files.ThumbnailKey, err)
+		data, contentType = nil, "image/jpeg"
+		if data, err = s.rebuildThumbnail(r.Context(), files); err != nil {
+			if r.Context().Err() == nil {
+				s.logger().Printf("rebuilding %s: %v", files.ThumbnailKey, err)
+			}
+			s.writeError(w, r, sourceError(err))
+			return
+		}
+	}
+	if contentType == "" || contentType == "binary/octet-stream" {
+		contentType = "image/jpeg"
+	}
+	h := w.Header()
+	h.Set("Content-Type", contentType)
+	h.Set("Content-Length", strconv.Itoa(len(data)))
+	h.Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Write(data)
 }
 
 // original serves the full image: from object storage when it was copied
-// there, otherwise from the first source path still present on disk.
+// there, otherwise (or when storage fails) from the first source path still
+// present on disk.
 func (s *Server) original(w http.ResponseWriter, r *http.Request) {
 	files, err := s.Library.Files(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -292,9 +319,58 @@ func (s *Server) original(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if files.OriginalKey != "" {
-		s.stream(w, r, files.OriginalKey, files.MimeType)
-		return
+		obj, err := s.openOriginal(r.Context(), files.OriginalKey)
+		if err == nil {
+			defer obj.Body.Close()
+			s.stream(w, obj, files.MimeType)
+			if _, err := io.Copy(w, obj.Body); err != nil && r.Context().Err() == nil {
+				s.logger().Printf("original %s: %v", files.OriginalKey, err)
+				s.repairOriginal(files)
+			}
+			return
+		}
+		if r.Context().Err() != nil {
+			return
+		}
+		s.logger().Printf("original %s: %v; serving the source file", files.OriginalKey, err)
+		s.repairOriginal(files)
 	}
+	if !s.serveFromPaths(w, r, files) {
+		s.writeError(w, r, library.ErrNotFound)
+	}
+}
+
+// openOriginal starts reading an original, giving up if storage doesn't
+// answer in time. The body can then take as long as it needs.
+func (s *Server) openOriginal(ctx context.Context, key string) (*storage.Object, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	timer := time.AfterFunc(originalTimeout, cancel)
+	obj, err := s.Objects.Get(ctx, key)
+	if err != nil || !timer.Stop() {
+		cancel()
+		if err == nil {
+			obj.Body.Close()
+			err = context.DeadlineExceeded
+		}
+		return nil, err
+	}
+	obj.Body = cancelOnClose{obj.Body, cancel}
+	return obj, nil
+}
+
+type cancelOnClose struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c cancelOnClose) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
+}
+
+// serveFromPaths serves the first source path that is a readable file.
+func (s *Server) serveFromPaths(w http.ResponseWriter, r *http.Request, files *library.Files) bool {
 	for _, path := range files.Paths {
 		f, err := os.Open(path)
 		if err != nil {
@@ -307,18 +383,13 @@ func (s *Server) original(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", files.MimeType)
 		http.ServeContent(w, r, info.Name(), info.ModTime(), f)
-		return
+		return true
 	}
-	s.writeError(w, r, library.ErrNotFound)
+	return false
 }
 
-func (s *Server) stream(w http.ResponseWriter, r *http.Request, key, contentType string) {
-	obj, err := s.Objects.Get(r.Context(), key)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	defer obj.Body.Close()
+// stream writes the headers for an object from storage.
+func (s *Server) stream(w http.ResponseWriter, obj *storage.Object, contentType string) {
 	if obj.ContentType != "" && obj.ContentType != "binary/octet-stream" {
 		contentType = obj.ContentType
 	}
@@ -327,5 +398,4 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, key, contentType
 		w.Header().Set("Content-Length", strconv.FormatInt(obj.Size, 10))
 	}
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	io.Copy(w, obj.Body)
 }

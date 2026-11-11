@@ -46,6 +46,8 @@ type S3Config struct {
 	Bucket    string
 	AccessKey string
 	SecretKey string
+	// MaxAttempts per request, including the first; 0 keeps the SDK default.
+	MaxAttempts int
 }
 
 // S3 stores objects in one bucket.
@@ -86,6 +88,7 @@ func newClient(cfg S3Config) *s3.Client {
 		// when an operation requires it.
 		RequestChecksumCalculation: aws.RequestChecksumCalculationWhenRequired,
 		ResponseChecksumValidation: aws.ResponseChecksumValidationWhenRequired,
+		RetryMaxAttempts:           cfg.MaxAttempts,
 	}
 	if cfg.AccessKey != "" {
 		opts.Credentials = credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, "")

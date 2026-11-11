@@ -4,6 +4,8 @@
 #   docker compose up -d
 # Queue a folder for indexing:
 #   docker compose run --rm crawler /path/under/PHOTOS_ROOT
+# Find and rebuild missing or corrupted thumbnails and originals: run scrub
+# from docker/pc instead, since the Pi doesn't have the memory for it.
 
 name: phalbum-rpi
 
@@ -116,6 +118,15 @@ services:
   crawler:
     <<: *phalbum
     entrypoint: ["crawler"]
+    mem_limit: 256m
+    profiles: [tools]
+
+  # On demand: reads every object back from SeaweedFS and rebuilds the broken
+  # ones from the photos. Prefer running it from docker/pc: on a Pi 3, stop the
+  # api first (docker compose stop api) and keep -concurrency 1.
+  scrub:
+    <<: *phalbum
+    entrypoint: ["scrub"]
     mem_limit: 256m
     profiles: [tools]
 

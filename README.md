@@ -300,6 +300,7 @@ machines must mount the NAS at the same location.
 | A file changes between crawl and indexing | The job fails with "content changed since crawl". The next crawl queues the new content |
 | Database unreachable at startup | The program exits, and the Docker restart policy retries it |
 | Lost connection while waiting for jobs | The indexer reconnects its listener on its own |
+| A thumbnail or stored original is missing or corrupted in SeaweedFS | The api serves the original from the source file and rebuilds the thumbnail from it, then writes both back. `scrub` finds and repairs them all. See [Corrupted objects](#corrupted-objects) |
 | Any connectivity doubt | Run `-check` on the affected program. See [Check the connections](#check-the-connections) |
 
 ### Limitations
@@ -321,6 +322,7 @@ phalbum/
 │   ├── api/          HTTP server for the API and web app
 │   ├── crawler/      Walks folders and queues jobs
 │   ├── indexer/      Processes the queue
+│   ├── scrub/        Checks every stored object, rebuilds broken ones
 │   └── clipdemo/     Tries the models on one image from the command line
 ├── internal/
 │   ├── api/          HTTP handlers and middleware
@@ -331,12 +333,13 @@ phalbum/
 │   ├── indexer/      The job pipeline
 │   ├── jobs/         The queue (owns its schema)
 │   ├── library/      Photos, tags and search (owns its schema)
+│   ├── repair/       Rebuilds thumbnails and originals from source files
 │   ├── settings/     Configuration from the environment and .env
 │   └── storage/      S3 client
 ├── api/openapi.yaml  API contract
 ├── scripts/          Model download
 ├── web/              React app
-└── Dockerfile        One image with api, indexer and crawler
+└── Dockerfile        One image with api, indexer, crawler and scrub
 docker/               Compose files and example settings
 ```
 
@@ -470,6 +473,31 @@ docker compose run --rm indexer -check
 docker compose run --rm --no-deps api -check
 docker compose run --rm --no-deps crawler -check
 ```
+
+### Corrupted objects
+
+SeaweedFS checks a checksum on every read. If the disk returned bad data, its log shows `invalid CRC
+for needle … data on disk corrupted`, and the read fails after several seconds of retries. The api
+copes with this on its own: it rebuilds the thumbnail from the source file, or serves the original
+from there, and writes the object back. To check and repair everything in one pass:
+
+```sh
+# in docker/pc on the PC
+docker compose run --rm scrub -dry-run   # list broken objects
+docker compose run --rm scrub            # rebuild them from the photos
+```
+
+Flags: `-only thumbnails|originals`, `-concurrency 1`, `-timeout 1m`. An object can't be repaired
+when its source file is gone, or has changed since it was indexed.
+
+Rebuilding hashes and decodes photos, which is too much for a Pi 3 next to the api. Run scrub from
+the PC instead (`docker compose run --rm scrub` in `docker/pc`): it reaches Postgres and S3 on the
+Pi and reads the photos from the NAS.
+
+Corruption on a USB disk usually means the disk link is failing. Look for resets in `dmesg -T | grep
+-iE 'uas|reset|I/O error'`. If UAS resets show up, add `usb-storage.quirks=<VID>:<PID>:u` (from
+`lsusb`) to `/boot/firmware/cmdline.txt` and reboot. Also check the power supply, or use a powered
+hub, and check the disk with `smartctl -a -d sat /dev/sdX`.
 
 ### What to expect on a Pi 3
 

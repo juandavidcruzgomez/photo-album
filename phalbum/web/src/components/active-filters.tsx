@@ -1,4 +1,5 @@
 import { Chip } from "@/components/chip"
+import { RetryImg } from "@/components/retry-img"
 import { formatDay } from "@/lib/format"
 import { useFilters } from "@/lib/search-params"
 
@@ -12,7 +13,7 @@ export function ActiveFilters() {
     <div className="flex gap-1.5 overflow-x-auto px-2 pb-2 [scrollbar-width:none] md:flex-wrap md:px-4">
       {f.similar && (
         <Chip onRemove={() => setFilters({ similar: "" })} removeLabel="Stop showing similar photos" className="pl-0.5">
-          <img src={`/api/photos/${f.similar}/thumbnail`} alt="" className="size-6 rounded-full object-cover" />
+          <RetryImg src={`/api/photos/${f.similar}/thumbnail`} alt="" className="size-6 rounded-full object-cover" />
           Similar photos
         </Chip>
       )}

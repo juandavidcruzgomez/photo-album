@@ -126,8 +126,17 @@ func TestGetAndFiles(t *testing.T) {
 		t.Errorf("embedding: len=%d err=%v", len(emb), err)
 	}
 	f, err := s.Files(ctx, ids["c"])
-	if err != nil || f.ThumbnailKey != "thumbnails/c.jpg" || f.Paths[0] != "/backup/c.jpg" {
+	if err != nil || f.ID != ids["c"] || f.ContentHash == "" || f.ThumbnailKey != "thumbnails/c.jpg" || f.Paths[0] != "/backup/c.jpg" {
 		t.Errorf("files: %+v err=%v", f, err)
+	}
+	seen := map[string]bool{}
+	if err := s.EachFiles(ctx, func(f *Files) error { seen[f.ID] = f.ThumbnailKey != ""; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	for name, id := range ids {
+		if !seen[id] {
+			t.Errorf("EachFiles missed %s", name)
+		}
 	}
 
 	for _, id := range []string{"not-a-uuid", "00000000-0000-0000-0000-000000000000"} {

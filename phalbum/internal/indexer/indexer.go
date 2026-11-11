@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	thumbnailSize = 512
+	thumbnailSize = imaging.ThumbnailSize
 	// workingSize bounds the short side of the decoded copy used for the
 	// embedding and the thumbnail; both need much less than a full photo.
 	workingSize = thumbnailSize

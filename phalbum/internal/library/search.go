@@ -267,27 +267,72 @@ func (s *Store) Embedding(ctx context.Context, id string) ([]float32, error) {
 
 // Files says where a photo's bytes can be read from.
 type Files struct {
+	ID           string
+	ContentHash  string // sha256 of the original, hex
 	ThumbnailKey string
 	OriginalKey  string // empty when the original isn't in object storage
 	MimeType     string
 	Paths        []string // local source paths
 }
 
-// Files returns the storage keys and local paths of a photo.
-func (s *Store) Files(ctx context.Context, id string) (*Files, error) {
+const filesColumns = `p.id, p.content_hash, p.thumbnail_key, p.original_key, p.mime_type,
+	ARRAY(SELECT path FROM crawled_files c WHERE c.content_hash = p.content_hash ORDER BY path)`
+
+func scanFiles(row pgx.Row) (*Files, error) {
 	var f Files
 	var original *string
-	err := s.pool.QueryRow(ctx, `
-		SELECT p.thumbnail_key, p.original_key, p.mime_type,
-		       ARRAY(SELECT path FROM crawled_files c WHERE c.content_hash = p.content_hash ORDER BY path)
-		FROM photos p WHERE p.id = $1`, id).Scan(&f.ThumbnailKey, &original, &f.MimeType, &f.Paths)
-	if err != nil {
-		return nil, notFound(err)
+	if err := row.Scan(&f.ID, &f.ContentHash, &f.ThumbnailKey, &original, &f.MimeType, &f.Paths); err != nil {
+		return nil, err
 	}
 	if original != nil {
 		f.OriginalKey = *original
 	}
 	return &f, nil
+}
+
+// Files returns the storage keys and local paths of a photo.
+func (s *Store) Files(ctx context.Context, id string) (*Files, error) {
+	f, err := scanFiles(s.pool.QueryRow(ctx, "SELECT "+filesColumns+" FROM photos p WHERE p.id = $1", id))
+	if err != nil {
+		return nil, notFound(err)
+	}
+	return f, nil
+}
+
+// EachFiles calls fn with the files of every photo, in id order, reading
+// them in pages so no query stays open while fn works.
+func (s *Store) EachFiles(ctx context.Context, fn func(*Files) error) error {
+	const page = 500
+	after := "00000000-0000-0000-0000-000000000000"
+	for {
+		rows, err := s.pool.Query(ctx, "SELECT "+filesColumns+
+			" FROM photos p WHERE p.id > $1::uuid ORDER BY p.id LIMIT $2", after, page)
+		if err != nil {
+			return err
+		}
+		var batch []*Files
+		for rows.Next() {
+			f, err := scanFiles(rows)
+			if err != nil {
+				rows.Close()
+				return err
+			}
+			batch = append(batch, f)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, f := range batch {
+			if err := fn(f); err != nil {
+				return err
+			}
+		}
+		if len(batch) < page {
+			return nil
+		}
+		after = batch[len(batch)-1].ID
+	}
 }
 
 // normalizeTags lowercases, trims and de-duplicates tag names.

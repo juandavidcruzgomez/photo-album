@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 #
-# One image holding the api (with the embedded web app), the indexer and the
-# crawler. It has no entrypoint: each compose service chooses its binary. The
+# One image holding the api (with the embedded web app), the indexer, the
+# crawler and scrub. It has no entrypoint: each compose service chooses its binary. The
 # models aren't in the image: fetch-models downloads them into a volume at startup.
 #
 # To build for another architecture, use --platform. The web app and Go binaries
@@ -34,12 +34,13 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
 COPY --from=web /src/web/dist web/dist
 ENV GOFLAGS=-trimpath GOOS=linux GOARCH=$TARGETARCH
-# api and indexer load ONNX Runtime through cgo; the crawler is pure Go.
+# api and indexer load ONNX Runtime through cgo; the crawler and scrub are pure Go.
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     export CC="$([ "$TARGETARCH" = arm64 ] && echo aarch64-linux-gnu-gcc || echo gcc)" \
  && CGO_ENABLED=1 go build -ldflags="-s -w" -o /out/api ./cmd/api \
  && CGO_ENABLED=1 go build -ldflags="-s -w" -o /out/indexer ./cmd/indexer \
- && CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/crawler ./cmd/crawler
+ && CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/crawler ./cmd/crawler \
+ && CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/scrub ./cmd/scrub
 
 # --- Runtime --------------------------------------------------------------------
 FROM debian:${DEBIAN}-slim

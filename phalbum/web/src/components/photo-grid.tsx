@@ -4,6 +4,7 @@ import { computeRowsLayout } from "react-photo-album"
 import { Check, Loader2 } from "lucide-react"
 
 import type { Photo } from "@/api/types"
+import { RetryImg } from "@/components/retry-img"
 import { useLongPress } from "@/hooks/use-long-press"
 import { yearOf } from "@/lib/format"
 import { cn } from "@/lib/utils"
@@ -226,7 +227,7 @@ const GridTile = memo(function GridTile({ tile, selected, selecting, onOpen, onT
         {...longPress.handlers}
         className="block size-full focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
       >
-        <img
+        <RetryImg
           src={photo.thumbnail_url}
           alt={photo.filename}
           loading="lazy"

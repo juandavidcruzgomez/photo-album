@@ -41,5 +41,27 @@ services:
       models:
         condition: service_completed_successfully
 
+  # On demand, not started by `up`: checks every object in SeaweedFS on the Pi
+  # and rebuilds the broken ones from the photos. Run it here rather than on the
+  # Pi, which doesn't have the memory for it:
+  #   docker compose run --rm scrub [-dry-run]
+  scrub:
+    image: ${IMAGE:?}
+    entrypoint: ["scrub"]
+    profiles: [tools]
+    environment:
+      PHOTOS_ROOT: ${PHOTOS_ROOT:?}
+      POSTGRES_HOST: ${POSTGRES_HOST:?}
+      POSTGRES_PORT: ${POSTGRES_PORT:?}
+      POSTGRES_USER: ${POSTGRES_USER:?}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: ${POSTGRES_DB:?}
+      S3_ENDPOINT: ${S3_ENDPOINT:?}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?}
+    user: "${PHOTOS_UID:-1000}:${PHOTOS_GID:-1000}"
+    volumes:
+      - ${PHOTOS_ROOT:?}:${PHOTOS_ROOT:?}:ro
+
 volumes:
   models:

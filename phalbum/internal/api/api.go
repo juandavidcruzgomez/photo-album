@@ -38,9 +38,11 @@ type Embedder interface {
 	EmbedImages(imgs ...image.Image) ([][]float32, error)
 }
 
-// Objects reads from object storage; *storage.S3 satisfies it.
+// Objects reads from object storage, and writes back objects rebuilt from
+// their source; *storage.S3 satisfies it.
 type Objects interface {
 	Get(ctx context.Context, key string) (*storage.Object, error)
+	Put(ctx context.Context, key, contentType string, body []byte) error
 }
 
 // Server serves the API.
@@ -56,11 +58,14 @@ type Server struct {
 	// servers running without the vision model.
 	NoImageSearch bool
 
-	embedMu sync.Mutex // CLIP calls are serialized
+	embedMu  sync.Mutex // CLIP calls are serialized
+	repairMu sync.Mutex // guards repairs.running
+	repairs  *repairs
 }
 
 // Handler returns the API's HTTP handler with middleware applied.
 func (s *Server) Handler() http.Handler {
+	s.repairs = newRepairs()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/photos", s.listPhotos)
@@ -130,5 +135,7 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	default:
 		s.logger().Printf("error: %s %s: %v", r.Method, r.URL.Path, err)
 	}
+	// Don't let browsers keep a failure, e.g. a broken image.
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, status, map[string]string{"error": msg})
 }

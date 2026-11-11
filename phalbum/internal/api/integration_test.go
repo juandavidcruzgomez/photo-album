@@ -32,7 +32,7 @@ func TestWithDatabase(t *testing.T) {
 		}
 		ids[name] = id
 	}
-	f := &fixture{h: (&Server{Library: lib, Embedder: &fakeEmbedder{}, Objects: fakeObjects{},
+	f := &fixture{h: (&Server{Library: lib, Embedder: &fakeEmbedder{}, Objects: newObjects(map[string]string{}),
 		Ping: pool.Ping, Log: log.New(io.Discard, "", 0)}).Handler()}
 
 	if rec := f.do("GET", "/api/health", nil, ""); rec.Code != 200 {

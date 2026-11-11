@@ -21,6 +21,9 @@ import (
 // EmbedSize is a working-copy size comfortably above CLIP's 224px input.
 const EmbedSize = 512
 
+// ThumbnailSize is the longest side of stored thumbnails.
+const ThumbnailSize = 512
+
 // Shrink scales img down so its shorter side is at most minSide, keeping the
 // aspect ratio. Smaller images are only converted to RGBA. Working on a
 // shrunk copy keeps orientation and thumbnailing cheap for large photos.

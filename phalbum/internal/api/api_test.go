@@ -3,7 +3,10 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/png"
 	"io"
@@ -13,8 +16,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/library"
 	"github.com/juandavidcruzgomez/photo-album/phalbum/internal/storage"
@@ -101,18 +107,58 @@ func (e *fakeEmbedder) EmbedImages(imgs ...image.Image) ([][]float32, error) {
 	return [][]float32{axis(2)}, nil
 }
 
-type fakeObjects map[string]string
+// fakeObjects is an object store whose reads of keys in fail return an error.
+type fakeObjects struct {
+	mu   sync.Mutex
+	data map[string]string
+	fail map[string]bool
+	puts []string
+}
 
-func (o fakeObjects) Get(_ context.Context, key string) (*storage.Object, error) {
-	body, ok := o[key]
+func newObjects(data map[string]string) *fakeObjects {
+	return &fakeObjects{data: data, fail: map[string]bool{}}
+}
+
+func (o *fakeObjects) Get(_ context.Context, key string) (*storage.Object, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.fail[key] {
+		return nil, errors.New("invalid CRC for needle")
+	}
+	body, ok := o.data[key]
 	if !ok {
 		return nil, storage.ErrNotFound
 	}
 	return &storage.Object{Body: io.NopCloser(strings.NewReader(body)), Size: int64(len(body))}, nil
 }
 
+func (o *fakeObjects) Put(_ context.Context, key, _ string, body []byte) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.data[key] = string(body)
+	delete(o.fail, key)
+	o.puts = append(o.puts, key)
+	return nil
+}
+
+// waitPut waits for a background write of key.
+func (o *fakeObjects) waitPut(t *testing.T, key string) {
+	t.Helper()
+	for range 200 {
+		o.mu.Lock()
+		done := slices.Contains(o.puts, key)
+		o.mu.Unlock()
+		if done {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("%s was not written back", key)
+}
+
 type fixture struct {
 	lib *fakeLibrary
+	obj *fakeObjects
 	emb *fakeEmbedder
 	h   http.Handler
 }
@@ -120,11 +166,12 @@ type fixture struct {
 func newFixture() *fixture {
 	lib := &fakeLibrary{files: library.Files{ThumbnailKey: "thumbnails/a.jpg", MimeType: "image/jpeg"}}
 	emb := &fakeEmbedder{}
+	obj := newObjects(map[string]string{"thumbnails/a.jpg": "JPEG", "originals/a.jpg": "ORIG"})
 	s := &Server{
-		Library: lib, Embedder: emb, Objects: fakeObjects{"thumbnails/a.jpg": "JPEG", "originals/a.jpg": "ORIG"},
+		Library: lib, Embedder: emb, Objects: obj,
 		CORSOrigins: []string{"http://app.local"}, Log: log.New(io.Discard, "", 0),
 	}
-	return &fixture{lib: lib, emb: emb, h: s.Handler()}
+	return &fixture{lib: lib, obj: obj, emb: emb, h: s.Handler()}
 }
 
 func (f *fixture) do(method, target string, body io.Reader, contentType string) *httptest.ResponseRecorder {
@@ -355,5 +402,75 @@ func TestCORS(t *testing.T) {
 	f.h.ServeHTTP(rec, req)
 	if rec.Header().Get("Access-Control-Allow-Origin") != "" {
 		t.Error("unknown origin must not be allowed")
+	}
+}
+
+// sourcePNG writes a 800×600 PNG and returns its path and sha256.
+func sourcePNG(t *testing.T, dir string) (string, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 800, 600)))
+	path := filepath.Join(dir, "src.png")
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(buf.Bytes())
+	return path, hex.EncodeToString(sum[:])
+}
+
+func TestBrokenStorageFallsBackToSource(t *testing.T) {
+	f := newFixture()
+	src, hash := sourcePNG(t, t.TempDir())
+	f.lib.files.Paths = []string{src}
+	f.lib.files.ContentHash = hash
+	f.lib.files.OriginalKey = "originals/a.jpg"
+	f.obj.fail["thumbnails/a.jpg"] = true
+	f.obj.fail["originals/a.jpg"] = true
+
+	// Thumbnail: rebuilt from the source, served, and written back.
+	rec := f.do("GET", "/api/photos/"+photoID+"/thumbnail", nil, "")
+	if rec.Code != 200 || rec.Header().Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("thumbnail: %d %v", rec.Code, rec.Header())
+	}
+	img, _, err := image.Decode(rec.Body)
+	if err != nil || img.Bounds().Dx() != 512 || img.Bounds().Dy() != 384 {
+		t.Fatalf("rebuilt thumbnail: %v %v", err, img)
+	}
+	f.obj.waitPut(t, "thumbnails/a.jpg")
+
+	// Original: served from the source file, and copied back.
+	rec = f.do("GET", "/api/photos/"+photoID+"/original", nil, "")
+	want, _ := os.ReadFile(src)
+	if rec.Code != 200 || !bytes.Equal(rec.Body.Bytes(), want) {
+		t.Fatalf("original: %d", rec.Code)
+	}
+	f.obj.waitPut(t, "originals/a.jpg")
+	f.obj.mu.Lock()
+	restored := f.obj.data["originals/a.jpg"] == string(want)
+	f.obj.mu.Unlock()
+	if !restored {
+		t.Error("original not restored in storage")
+	}
+}
+
+func TestBrokenStorageWithoutUsableSource(t *testing.T) {
+	f := newFixture()
+	src, _ := sourcePNG(t, t.TempDir())
+	f.obj.fail["thumbnails/a.jpg"] = true
+
+	// The file changed since indexing: don't store a thumbnail of other content.
+	f.lib.files.Paths = []string{src}
+	f.lib.files.ContentHash = strings.Repeat("0", 64)
+	rec := f.do("GET", "/api/photos/"+photoID+"/thumbnail", nil, "")
+	if rec.Code != 404 || rec.Header().Get("Cache-Control") != "no-store" {
+		t.Errorf("changed source: %d %v", rec.Code, rec.Header())
+	}
+
+	f.lib.files.Paths = []string{filepath.Join(t.TempDir(), "gone.png")}
+	if rec := f.do("GET", "/api/photos/"+photoID+"/thumbnail", nil, ""); rec.Code != 404 {
+		t.Errorf("missing source: %d", rec.Code)
+	}
+	if len(f.obj.puts) != 0 {
+		t.Errorf("unexpected writes: %v", f.obj.puts)
 	}
 }
