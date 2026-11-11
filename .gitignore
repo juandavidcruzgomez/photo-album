@@ -5,3 +5,4 @@ data/**
 phalbum/models/
 main
 phalbum/bin/
+*_instructions.md

@@ -6,6 +6,13 @@
 #   docker compose run --rm crawler /path/under/PHOTOS_ROOT
 # Find and rebuild missing or corrupted thumbnails and originals: run scrub
 # from docker/pc instead, since the Pi doesn't have the memory for it.
+#
+# Memory: a Pi 3 has less RAM than the limits below add up to. So no container
+# may swap (memswap_limit = mem_limit): one that hits its limit is killed and
+# restarted instead of dragging the whole Pi into swap. When the Pi itself runs
+# short, oom_score_adj makes the kernel kill the api or a tool first, never
+# Postgres or SeaweedFS in the middle of a write. stop_grace_period gives both
+# time to flush on `docker compose down` or a restart.
 
 name: phalbum-rpi
 
@@ -43,6 +50,9 @@ services:
     image: pgvector/pgvector:pg14
     restart: unless-stopped
     mem_limit: 256m
+    memswap_limit: 256m
+    oom_score_adj: -500
+    stop_grace_period: 60s
     shm_size: 64mb
     command:
       - postgres
@@ -73,9 +83,13 @@ services:
   # Stores thumbnails and copied photos. Master, volume, filer and S3 run in one
   # process to save memory, and only S3 is published.
   seaweedfs:
-    image: chrislusf/seaweedfs:latest
+    # A fixed version: a new one must not change the storage engine on a pull.
+    image: chrislusf/seaweedfs:${SEAWEEDFS_VERSION:?set SEAWEEDFS_VERSION in .env, see .env.example}
     restart: unless-stopped
     mem_limit: 256m
+    memswap_limit: 256m
+    oom_score_adj: -500
+    stop_grace_period: 60s
     environment:
       AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:?}
       AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:?}
@@ -106,6 +120,9 @@ services:
     entrypoint: ["api"]
     restart: unless-stopped
     mem_limit: 600m
+    memswap_limit: 600m
+    oom_score_adj: 300
+    stop_grace_period: 20s
     ports:
       - 8090:8090
     healthcheck:
@@ -119,6 +136,8 @@ services:
     <<: *phalbum
     entrypoint: ["crawler"]
     mem_limit: 256m
+    memswap_limit: 256m
+    oom_score_adj: 800
     profiles: [tools]
 
   # On demand: reads every object back from SeaweedFS and rebuilds the broken
@@ -128,6 +147,8 @@ services:
     <<: *phalbum
     entrypoint: ["scrub"]
     mem_limit: 256m
+    memswap_limit: 256m
+    oom_score_adj: 800
     profiles: [tools]
 
 volumes:
